@@ -1,0 +1,58 @@
+// @ts-nocheck
+/**
+ * 自动移植自 src/KuGouMusicApi/module/images_audio.js
+ * 接口路由：/images/audio
+ *
+ * 本文件由 scripts/port-modules.mjs 从原库机械转换，保留原有实现与注释。
+ * 模块层关闭 TypeScript 检查；类型与业务封装维护在 src/api/core 与 App 层。
+ */
+import type { UseAxios } from '../core/types';
+
+import { signatureAndroidParams, appid, clientver } from '../core/compat';
+
+export default (params: any, useAxios: UseAxios): Promise<any> => {
+  const data = (params?.hash || '').split(',').map((s) => ({ audio_id: 0, hash: s, album_audio_id: 0, filename: '' }));
+  (params?.audio_id || '').split(',').forEach((s, index) => {
+    if (index <= data.length - 1) {
+      data[index]['audio_id'] = s || 0;
+    }
+  });
+  (params?.album_audio_id || '').split(',').forEach((s, index) => {
+    if (index <= data.length - 1) {
+      data[index]['album_audio_id'] = s || 0;
+    }
+  });
+  (params?.filename || '').split(',').forEach((s, index) => {
+    if (index <= data.length - 1) {
+      data[index]['filename'] = s;
+    }
+  });
+
+  const paramsMap = {
+    appid,
+    clientver,
+    count: params?.count || 5,
+    data,
+    isCdn: 1,
+    publish_time: 1,
+    show_authors: 1,
+  };
+
+  const query = Object.keys(paramsMap)
+    .sort()
+    .map((s) => `${s}=${encodeURIComponent(typeof paramsMap[s] === 'object' ? JSON.stringify(paramsMap[s]) : paramsMap[s])}`);
+
+  const signature = signatureAndroidParams(paramsMap);
+
+  return useAxios({
+    baseURL: 'https://expendablekmr.kugou.com',
+    url: `/v2/author_image/audio?${query.join('&')}`,
+    method: 'GET',
+    encryptType: 'android',
+    params: { signature },
+    cookie: params?.cookie || {},
+    notSign: true,
+    clearDefaultParams: true,
+  });
+};
+

@@ -1,0 +1,30 @@
+/**
+ * 酷狗客户端内置 RSA 公钥。
+ *
+ * 公钥只用于“加密请求参数”，服务端持有对应私钥。放在单独文件里，
+ * 避免 `config.ts` 与 `crypto.ts` 互相引用形成循环依赖。
+ */
+
+/** 标准版客户端公钥（1024 bit） */
+export const PUBLIC_RSA_KEY = `-----BEGIN PUBLIC KEY-----
+MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDIAG7QOELSYoIJvTFJhMpe1s/gbjDJX51HBNnEl5HXqTW6lQ7LC8jr9fWZTwusknp+sVGzwd40MwP6U5yDE27M/X1+UR4tvOGOqp94TJtQ1EPnWGWXngpeIW5GxoQGao1rmYWAu6oi1z9XkChrsUdC6DJE5E221wf/4WLFxwAtRQIDAQAB
+-----END PUBLIC KEY-----`;
+
+/** 概念版（lite / Young）客户端公钥（1024 bit） */
+export const PUBLIC_LITE_RSA_KEY = `-----BEGIN PUBLIC KEY-----
+MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDECi0Np2UR87scwrvTr72L6oO01rBbbBPriSDFPxr3Z5syug0O24QyQO8bg27+0+4kBzTBTBOZ/WWU0WryL1JSXRTXLgFVxtzIY41Pe7lPOgsfTCn5kZcvKhYKJesKnnJDNr5/abvTGf+rHG3YRwsCHcQ08/q6ifSioBszvb3QiwIDAQAB
+-----END PUBLIC KEY-----`;
+
+/**
+ * 行为指纹（SSA）使用的 RSA-2048 公钥。
+ * 用于 RSA-OAEP(SHA-256) 加密随机 AES 密钥，生成 sid。
+ */
+export const SIMULATE_RSA_KEY = `-----BEGIN PUBLIC KEY-----
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAoW2+Ylo8ALePSQTP0xBF
+lFmEOHvBD9tS+s7DBlfKEu3RzzvZTaX1JtYbX4+AVUqj6ARz8IM+CKByqGFvbHN/
+W64XxNI+q7z36ajCL3VTJ2W5G9MCJitc6oGbire4NQfhaEq0nC+hxBWQvCbIFflA
+2ItrLUbSU7z1bHA/a+jlQm4OWvY+IKnTryOJTPuT1yNOVjbJ8wBLKy2DgQr9pPqW
+PmEQtGpR5IM9V8Kao6PaSdKYOWGbX3i2+RzIKhvZUxxtJwdVbqPlDPlW9h4/xIBc
+56Lgvr4aIl8nFtwbj4UJVUTFuGrs0tY9H/tXvZ22dUCKuGxW/gW7ZF+gXz6vHtYa
+rQIDAQAB
+-----END PUBLIC KEY-----`;
