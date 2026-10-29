@@ -3,7 +3,7 @@
  * 评论底部弹层（歌曲 / 歌单 / 专辑）。
  *
  * 打开时加载第一页评论，支持分页、展开楼层回复和发表评论。
- * 发表评论需要登录；未登录会直接跳到扫码登录页。
+ * 发表评论需要登录；未登录会直接跳到登录页。
  */
 
 import { computed, reactive, ref, watch } from 'vue';
@@ -15,6 +15,7 @@ import {
   getFloorComments,
   getPlaylistComments,
   getSongComments,
+  rememberUser,
   sendAlbumComment,
   sendPlaylistComment,
   sendSongComment,
@@ -182,6 +183,25 @@ function shortTime(value: string): string {
   return value.length > 16 ? value.slice(0, 16) : value;
 }
 
+/** 点击评论头像/昵称进入用户主页 */
+function openUser(comment: CommentItem): void {
+  if (!comment.userId) {
+    toast.info('该用户没有可访问的主页');
+    return;
+  }
+  rememberUser({
+    id: comment.userId,
+    name: comment.userName,
+    avatar: comment.userAvatar,
+    signature: '',
+    fans: 0,
+    follows: 0,
+    songs: 0,
+  });
+  emit('close');
+  void router.push(`/user/${comment.userId}`);
+}
+
 /** 未登录时点输入框直接引导登录 */
 function focusEditor(): void {
   if (!user.loggedIn) {
@@ -229,12 +249,23 @@ watch(
 
             <div v-else-if="comments.length" class="comment-list">
               <article v-for="comment in comments" :key="comment.id" class="comment-item">
-                <div class="comment-avatar">
+                <button
+                  class="comment-avatar"
+                  type="button"
+                  :aria-label="`查看 ${comment.userName} 的主页`"
+                  @click="openUser(comment)"
+                >
                   <CoverImage :src="comment.userAvatar" :alt="comment.userName" :icon-size="16" />
-                </div>
+                </button>
                 <div class="comment-main">
                   <div class="comment-meta">
-                    <span class="comment-user ellipsis">{{ comment.userName }}</span>
+                    <button
+                      class="comment-user ellipsis"
+                      type="button"
+                      @click="openUser(comment)"
+                    >
+                      {{ comment.userName }}
+                    </button>
                     <span v-if="comment.hot" class="comment-tag">热</span>
                     <span class="comment-time">{{ shortTime(comment.time) }}</span>
                   </div>
@@ -258,7 +289,14 @@ watch(
                       加载回复
                     </div>
                     <p v-for="reply in replies[comment.id].items" :key="reply.id" class="comment-reply">
-                      <span class="comment-reply__user">{{ reply.userName }}：</span>{{ reply.content }}
+                      <button
+                        class="comment-reply__user"
+                        type="button"
+                        @click="openUser(reply)"
+                      >
+                        {{ reply.userName }}：
+                      </button>
+                      {{ reply.content }}
                     </p>
                     <p v-if="!replies[comment.id].loading && !replies[comment.id].items.length" class="comment-reply muted">
                       暂无回复
@@ -385,9 +423,12 @@ watch(
   flex: 0 0 auto;
   width: 34px;
   height: 34px;
+  padding: 0;
   overflow: hidden;
+  border: 0;
   border-radius: 50%;
   background: var(--surface);
+  cursor: pointer;
 }
 
 .comment-main {
@@ -404,9 +445,15 @@ watch(
 
 .comment-user {
   max-width: 130px;
+  padding: 0;
+  border: 0;
   color: var(--text-2);
+  font-family: inherit;
   font-size: 11px;
   font-weight: 600;
+  text-align: left;
+  background: none;
+  cursor: pointer;
 }
 
 .comment-tag {
@@ -480,7 +527,13 @@ watch(
 }
 
 .comment-reply__user {
+  padding: 0;
+  border: 0;
   color: var(--accent);
+  font-family: inherit;
+  font-size: inherit;
+  background: none;
+  cursor: pointer;
 }
 
 .comment-more {

@@ -10,6 +10,7 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "api:check": "tsx scripts/verify-api.ts",
+    "api:catalog": "node scripts/gen-route-catalog.mjs",
     "android:init": "tauri android init && node scripts/patch-android.mjs",
     "android:patch": "node scripts/patch-android.mjs",
     "android:dev": "tauri android dev",

@@ -65,22 +65,45 @@ export default (params: any, useAxios: UseAxios): Promise<any> => {
     })
       .then((res) => {
         const { body } = res;
-        if (body?.status && body?.status === 1) {
-          if (body?.data?.secu_params) {
+        // 服务端可能把 status 返回成字符串 "1"，统一按数字判断
+        if (Number(body?.status) === 1 && body?.data && typeof body.data === 'object') {
+          if (body.data.secu_params) {
             const getToken = cryptoAesDecrypt(body.data.secu_params, encryptParams.key);
-            if (typeof getToken === 'object') {
+            if (getToken && typeof getToken === 'object') {
               res.body.data = { ...body.data, ...getToken };
-              Object.keys(getToken).forEach((key) => res.cookie.push(`${key}=${getToken[key]}`));
-            } else {
+            } else if (typeof getToken === 'string' && getToken) {
+              // 个别版本只返回新的 token 字符串
               res.body.data['token'] = getToken;
             }
           }
-          
-          res.cookie.push(`t1=${res.body.data['t1']}`);
-          res.cookie.push(`token=${res.body.data['token']}`);
-          res.cookie.push(`userid=${res.body.data?.userid || 0}`);
-          res.cookie.push(`vip_type=${res.body.data?.vip_type || 0}`);
-          res.cookie.push(`vip_token=${res.body.data?.vip_token || ''}`);
+
+          /*
+           * 只落库服务端真正返回的字段。
+           *
+           * 原实现无条件写入 t1/token/userid/vip_*；刷新响应如果没有这些
+           * 字段，就会用 "undefined" / 0 覆盖本地仍然有效的登录态，导致
+           * 点一次“刷新登录状态”反而掉登录。刷新成功但 token 不变是正常
+           * 情况（服务端只续期），此时不应改动本地凭证。
+           */
+          const data = res.body.data || {};
+          const authKeys = ['t1', 'token', 'userid', 'vip_type', 'vip_token'];
+          for (const key of authKeys) {
+            const raw = data[key];
+            if (raw === undefined || raw === null) continue;
+            const value = String(raw).trim();
+            if (!value || value === 'undefined' || value === 'null') continue;
+            if ((key === 'token' || key === 'userid') && value === '0') continue;
+            res.cookie.push(`${key}=${value}`);
+          }
+
+          // secu_params 可能还带有 auth/user_type 等后续请求需要的字段
+          for (const [key, raw] of Object.entries(data)) {
+            if (authKeys.includes(key)) continue;
+            if (typeof raw !== 'string' && typeof raw !== 'number') continue;
+            const value = String(raw).trim();
+            if (!value || value === 'undefined' || value === 'null') continue;
+            res.cookie.push(`${key}=${value}`);
+          }
         }
         resolve(res);
       })

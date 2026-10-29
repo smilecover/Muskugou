@@ -2,13 +2,14 @@
 /**
  * 歌曲列表。
  *
- * 点击任意一行会把整个列表作为播放队列，并从点击的位置开始播放；
- * 这样播放页的“上一首/下一首”始终与当前列表一致。
+ * 默认点击任意一行会把整个列表作为播放队列，并从点击的位置开始播放；
+ * 歌单详情通过 `queueLoader` 提供完整歌单（列表本身是分页的），
+ * 搜索结果通过 `insertQueue` 保留现有队列，只把点中的歌曲插入并播放。
  */
 
 import { Heart, Music2 } from 'lucide-vue-next';
 import CoverImage from './CoverImage.vue';
-import type { Song } from '@/api';
+import { toErrorMessage, type Song } from '@/api';
 import { formatDuration } from '@/utils/format';
 import { useLibraryStore } from '@/stores/library';
 import { usePlayerStore } from '@/stores/player';
@@ -26,6 +27,10 @@ const props = withDefaults(
     emptyDesc?: string;
     /** 是否显示收藏按钮 */
     showFavorite?: boolean;
+    /** 点击歌曲时获取完整播放队列（歌单分页场景） */
+    queueLoader?: () => Promise<Song[]> | Song[];
+    /** 保留现有队列，只把点中的歌曲插入并播放（搜索结果场景） */
+    insertQueue?: boolean;
   }>(),
   {
     loading: false,
@@ -34,6 +39,7 @@ const props = withDefaults(
     emptyTitle: '暂时没有歌曲',
     emptyDesc: '换个页面或稍后再试试',
     showFavorite: true,
+    insertQueue: false,
   },
 );
 
@@ -45,8 +51,36 @@ function isCurrent(song: Song): boolean {
   return player.current?.id === song.id;
 }
 
-function play(index: number): void {
-  void player.playSongs(props.songs, index);
+/** 防止“加载完整歌单”期间重复点击 */
+let preparingQueue = false;
+
+async function play(index: number): Promise<void> {
+  const song = props.songs[index];
+  if (!song) return;
+
+  if (props.insertQueue) {
+    // 搜索试听：保留当前队列，只插入这一首
+    void player.playInserted(song);
+    return;
+  }
+
+  if (!props.queueLoader) {
+    void player.playSongs(props.songs, index);
+    return;
+  }
+
+  if (preparingQueue) return;
+  preparingQueue = true;
+  try {
+    const all = await props.queueLoader();
+    if (!all.length) return;
+    const start = all.findIndex((item) => item.id === song.id);
+    await player.playSongs(all, start >= 0 ? start : 0);
+  } catch (error) {
+    toast.error(toErrorMessage(error));
+  } finally {
+    preparingQueue = false;
+  }
 }
 
 function toggleFavorite(song: Song): void {

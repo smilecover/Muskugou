@@ -14,6 +14,12 @@ import { getCookieJar, getAuth, hasLogin, removeCookieValue, setCookieObject, se
 import { getSettings } from './core/config';
 import { callModule, callModuleBody } from './registry';
 import {
+  applyPrivilegeToSong,
+  enrichSongsWithCovers,
+  enrichSongsWithQualities,
+  getSongPrivilegeInfo,
+} from './features/quality';
+import {
   extractList,
   findFirstWith,
   flattenAlbumBuckets,
@@ -37,21 +43,37 @@ import {
 // 通用工具
 // ---------------------------------------------------------------------------
 
+/** 从字符串或嵌套错误对象里提取文案（微信接口常把错误放在 msg/errmsg 对象里） */
+function messageFrom(value: unknown, depth = 0): string {
+  if (typeof value === 'string') return value.trim();
+  if (!value || typeof value !== 'object' || depth >= 3) return '';
+  const record = value as Record<string, unknown>;
+  return (
+    messageFrom(record.errmsg, depth + 1) ||
+    messageFrom(record.msg, depth + 1) ||
+    messageFrom(record.error_msg, depth + 1) ||
+    messageFrom(record.message, depth + 1) ||
+    messageFrom(record.error, depth + 1)
+  );
+}
+
 /** 把接口错误转成适合 UI 展示的文案 */
 export function toErrorMessage(error: unknown): string {
   const anyError = error as any;
   const body = anyError?.body;
   const message =
-    body?.error ||
-    body?.msg ||
-    body?.error_msg ||
-    body?.message ||
-    anyError?.message ||
-    (typeof error === 'string' ? error : '');
-  const code = body?.error_code ?? body?.errcode;
+    messageFrom(body?.error) ||
+    messageFrom(body?.msg) ||
+    messageFrom(body?.error_msg) ||
+    messageFrom(body?.message) ||
+    messageFrom(anyError?.message) ||
+    messageFrom(error);
+  const code = Number(body?.error_code ?? body?.errcode);
+  if (code === 20017) return '登录状态已过期，请重新登录';
+  if (code === 20018) return '登录状态校验未通过，请稍后重试或重新登录';
   if (code === 20028) return '请求触发安全验证，请稍后再试或先登录';
   if (code === 20010) return '参数不正确或内容不可用';
-  if (typeof message === 'string' && message.trim()) return message.trim();
+  if (message) return message;
   return '网络请求失败，请检查网络后重试';
 }
 
@@ -241,7 +263,9 @@ export async function getConceptRecommendSongs(pageSize = 10): Promise<Song[]> {
     extractList(body),
   ];
   const list = candidates.find((item) => Array.isArray(item) && item.length) || [];
-  return list.map((item: any) => normalizeSong(item?.song_info || item?.audio_info || item, 'concept'));
+  // 推荐条目的歌名/歌手/专辑在外层，audio_info 只有 hash；
+  // 取 audio_info 会得到“未知歌曲/未知歌手”，因此传入完整条目由归一化层展开。
+  return list.map((item: any) => normalizeSong(item, 'concept'));
 }
 
 /** 推荐歌单 */
@@ -378,7 +402,20 @@ export interface PlaylistPage {
   hasMore: boolean;
 }
 
-export async function getPlaylistPage(id: string, page = 1, pageSize = 50): Promise<PlaylistPage> {
+export interface PlaylistPageOptions {
+  /**
+   * 是否补齐音质和封面，默认开启。
+   * 播放队列需要一次性拉取整个歌单，可关闭以降低请求量（播放时再懒加载）。
+   */
+  enrich?: boolean;
+}
+
+export async function getPlaylistPage(
+  id: string,
+  page = 1,
+  pageSize = 50,
+  options: PlaylistPageOptions = {},
+): Promise<PlaylistPage> {
   // 用户自建/收藏的歌单使用数字 listid，需要走 cloudlist 的新版接口；
   // 公开歌单使用 collection_xxx 形式的 global_collection_id。
   const isUserList = /^\d+$/.test(id);
@@ -389,6 +426,17 @@ export async function getPlaylistPage(id: string, page = 1, pageSize = 50): Prom
   const data = body?.data || body || {};
   const rawSongs = data.songs || data.lists || data.info || [];
   const songs = rawSongs.map((item: any) => normalizeSong(item, 'playlist'));
+
+  if (options.enrich !== false) {
+    // v3 云歌单可能只返回 128K hash（没有 relate_goods）：
+    // 仅当有歌曲缺少多音质信息时才批量查权益，避免公开歌单多一次请求。
+    if (songs.some((song: Song) => song.qualities.length < 2)) {
+      await enrichSongsWithQualities(songs).catch(() => 0);
+    }
+    // 封面在后台补，不阻塞列表展示
+    void enrichSongsWithCovers(songs);
+  }
+
   const infoCandidate = data.list_info || data.info;
   const info =
     infoCandidate && typeof infoCandidate === 'object' && !Array.isArray(infoCandidate)
@@ -417,6 +465,62 @@ export async function getPlaylistPage(id: string, page = 1, pageSize = 50): Prom
     songs,
     total,
     hasMore: songs.length > 0 && page * pageSize < total,
+  };
+}
+
+export interface PlaylistSongsResult {
+  songs: Song[];
+  total: number;
+  /** 歌曲数量超过 maxSongs，队列被截断 */
+  truncated: boolean;
+}
+
+/**
+ * 拉取歌单里的全部歌曲，供“播放全部 / 随机播放 / 点击歌单内歌曲”构建完整队列。
+ *
+ * 详情页首屏只加载 50 首；如果直接用当前列表当队列，播放到第 50 首就结束了。
+ * 这里按 300 首/页循环拉取（公开歌单和云歌单都支持该页大小），最多 5000 首。
+ * 不在这里批量补齐音质/封面：几千首歌会发出大量请求并拖慢起播，
+ * 每首歌真正播放时由 `getSongUrl` 懒加载即可。
+ */
+export async function getPlaylistAllSongs(id: string, maxSongs = 5000): Promise<PlaylistSongsResult> {
+  const songs: Song[] = [];
+  const seen = new Set<string>();
+  let total = 0;
+  let page = 1;
+  let pageSize = 300;
+
+  while (page <= 100 && songs.length < maxSongs) {
+    const result = await getPlaylistPage(id, page, pageSize, { enrich: false });
+    total = Math.max(total, result.total || 0);
+
+    let added = 0;
+    for (const song of result.songs) {
+      if (seen.has(song.id)) continue;
+      seen.add(song.id);
+      songs.push(song);
+      added += 1;
+      if (songs.length >= maxSongs) break;
+    }
+
+    // 空页、整页都是重复数据或已达上限时结束，避免接口异常导致死循环
+    if (!result.songs.length || added === 0 || songs.length >= maxSongs) break;
+
+    const fullPage = result.songs.length >= pageSize;
+    page += 1;
+    if (!fullPage) {
+      // 整页不足但总数显示还有剩余，说明服务端把 pagesize 截断了：
+      // 下一页按实际返回数计算偏移，否则会跳过中间歌曲。
+      // total 也缺失时只能把“不足一页”当作最后一页。
+      if (!total || songs.length >= total) break;
+      pageSize = result.songs.length;
+    }
+  }
+
+  return {
+    songs,
+    total: Math.max(total, songs.length),
+    truncated: songs.length >= maxSongs && total > songs.length,
   };
 }
 
@@ -563,10 +667,9 @@ export function qualityCandidates(song: Song, quality: Quality): SongQuality[] {
     .filter((item) => QUALITY_RANK[item.quality] <= requested && item.hash)
     .sort((a, b) => QUALITY_RANK[b.quality] - QUALITY_RANK[a.quality]);
 
-  // 搜索结果偶尔缺少 128 条目；song.hash 本身就是 128K hash，补一个兜底
-  if (!list.some((item) => item.quality === '128') && song.hash) {
-    list.push({ quality: '128', hash: song.hash });
-  }
+  // 始终把标准 hash 作为最后的 128K 兜底：
+  // qualities 里的 128 可能是概念版 OGG 资源，部分接口/设备只接受标准 hash。
+  if (song.hash) list.push({ quality: '128', hash: song.hash });
 
   // 多音质接口偶尔返回相同 hash，去重避免重复请求
   const seen = new Set<string>();
@@ -575,6 +678,26 @@ export function qualityCandidates(song: Song, quality: Quality): SongQuality[] {
     seen.add(item.hash);
     return true;
   });
+}
+
+/**
+ * 播放前补齐音质信息。
+ *
+ * 云歌单/历史记录里可能只有 128K 一个音质，直接按 320/无损取地址会
+ * 一路回退到 128K。这里按需调用一次权益接口，把 320K/FLAC/Hi-Res 的
+ * hash 合并进歌曲对象（结果有缓存，不会每首歌都请求）。
+ */
+async function ensurePlayableQualities(song: Song, quality: Quality): Promise<void> {
+  if (getSettings().platform !== 'lite' || !song.hash) return;
+
+  const requested = QUALITY_RANK[quality] ?? 0;
+  const hasRequested = song.qualities.some(
+    (item) => item.hash && QUALITY_RANK[item.quality] === requested,
+  );
+  if (hasRequested) return;
+
+  const info = await getSongPrivilegeInfo(song).catch(() => null);
+  if (info) applyPrivilegeToSong(song, info);
 }
 
 /** 按请求音质挑选 hash；没有目标音质时向下回退 */
@@ -681,6 +804,11 @@ export async function getSongUrl(
   if (!force && cached && cached.expiresAt > Date.now()) return cached;
 
   await ensureDfid().catch(() => null);
+
+  // 云歌单可能只返回 128K：按需补齐目标音质的 hash
+  await ensurePlayableQualities(song, quality);
+  // 封面缺失时后台补全，不阻塞播放地址请求（内部会跳过已有封面的歌曲）
+  if (song.albumId) void enrichSongsWithCovers([song]);
 
   const candidates = qualityCandidates(song, quality);
   let lastBody: any = null;

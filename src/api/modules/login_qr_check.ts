@@ -29,9 +29,18 @@ export default (params: any, useAxios: UseAxios): Promise<any> => {
       cookie: params?.cookie || {},
     })
       .then((resp) => {
-        if (resp.body?.data?.status == 4) {
-          resp.cookie.push(`token=${resp.body?.data?.token}`);
-          resp.cookie.push(`userid=${resp.body?.data?.userid}`);
+        if (Number(resp.body?.data?.status) === 4) {
+          // 扫码成功除了 token/userid，概念版还可能返回 t1、vip_type、
+          // vip_token。这些字段后续刷新登录态时要用，必须一起落库。
+          const data = resp.body?.data || {};
+          for (const key of ['token', 'userid', 't1', 'vip_type', 'vip_token']) {
+            const raw = data[key];
+            if (raw === undefined || raw === null) continue;
+            const value = String(raw).trim();
+            if (!value || value === 'undefined' || value === 'null') continue;
+            if (key === 'userid' && value === '0') continue;
+            resp.cookie.push(`${key}=${value}`);
+          }
         }
         resolve(resp);
       })

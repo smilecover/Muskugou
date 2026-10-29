@@ -25,6 +25,7 @@ import {
 } from 'lucide-vue-next';
 import CoverImage from '@/components/CoverImage.vue';
 import PlaylistCard from '@/components/PlaylistCard.vue';
+import UserLevelCard from '@/components/UserLevelCard.vue';
 import { useLibraryStore } from '@/stores/library';
 import { useMembershipStore } from '@/stores/membership';
 import { useToastStore } from '@/stores/toast';
@@ -65,8 +66,18 @@ function openPlaylists(): void {
   document.getElementById('my-playlists')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
+/** 点击头像进入主页；资料尚未回来时用 /user/me 让主页自行加载 */
+function openProfile(): void {
+  if (!user.loggedIn) {
+    router.push('/login');
+    return;
+  }
+  router.push(user.profile?.userid ? `/user/${user.profile.userid}` : '/user/me');
+}
+
 onMounted(() => {
   if (user.loggedIn && !user.profile) void user.refresh();
+  else if (user.loggedIn && !user.grade && !user.gradeError) void user.refreshGrade();
   if (user.loggedIn && !membership.loaded) void membership.refresh();
 });
 </script>
@@ -87,9 +98,14 @@ onMounted(() => {
     <section class="profile-card">
       <div class="profile-card__glow" />
       <div class="profile-main">
-        <div class="profile-avatar">
+        <button
+          class="profile-avatar"
+          type="button"
+          :aria-label="user.loggedIn ? '查看我的主页' : '登录账号'"
+          @click="openProfile"
+        >
           <CoverImage :src="user.avatar" :alt="user.nickname" :icon-size="26" />
-        </div>
+        </button>
         <div class="profile-info">
           <p class="profile-name ellipsis">{{ user.nickname }}</p>
           <p v-if="user.loggedIn" class="profile-sub ellipsis">
@@ -114,6 +130,14 @@ onMounted(() => {
           登录
         </button>
       </div>
+
+      <UserLevelCard
+        v-if="user.loggedIn && (user.grade || user.gradeLoading)"
+        class="profile-level"
+        :grade="user.grade"
+        :loading="user.gradeLoading"
+        compact
+      />
 
       <div class="profile-stats">
         <button class="stat" @click="router.push('/favorites')">
@@ -189,7 +213,7 @@ onMounted(() => {
         </div>
         <div class="login-prompt__text">
           <p>把酷狗歌单带到这里</p>
-          <span>扫码登录后即可查看你收藏的歌单</span>
+          <span>登录后即可查看你收藏的歌单</span>
         </div>
         <button class="text-btn" @click="router.push('/login')">去登录</button>
       </div>
@@ -315,10 +339,16 @@ onMounted(() => {
   flex: 0 0 auto;
   width: 62px;
   height: 62px;
+  padding: 0;
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.16);
   border-radius: 50%;
   background: var(--surface);
+  cursor: pointer;
+}
+
+.profile-level {
+  margin-top: 14px;
 }
 
 .profile-info {

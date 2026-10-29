@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { getCookieJar, setCookieStrings } from '../src/api/core/jar';
 import { createRequest } from '../src/api/core/request';
 import type { KuGouResponse, UseAxios } from '../src/api/core/types';
+import { ROUTE_CATALOG } from '../src/api/route-catalog';
 
 import registerDev from '../src/api/modules/register_dev';
 import search from '../src/api/modules/search';
@@ -134,6 +135,25 @@ async function main(): Promise<void> {
     }
     if (invalid.length) throw new Error(`以下模块没有导出处理函数：${invalid.join(', ')}`);
     return `${files.length} 个文件，全部可加载`;
+  });
+
+  await check('路由目录同步', async () => {
+    const directory = join(process.cwd(), 'src', 'api', 'modules');
+    const files = readdirSync(directory).filter(
+      (file) => file.endsWith('.ts') && !file.startsWith('_')
+    );
+    const expected = new Set(
+      files.map((file) => `/${file.replace(/\.ts$/i, '').replace(/_/g, '/')}`)
+    );
+    const catalogued = new Set(ROUTE_CATALOG.map((entry) => entry.route));
+    const missing = [...expected].filter((route) => !catalogued.has(route));
+    const extra = [...catalogued].filter((route) => !expected.has(route));
+    if (missing.length || extra.length) {
+      throw new Error(
+        `目录与模块文件不一致：缺少 ${missing.join(', ') || '无'}；多余 ${extra.join(', ') || '无'}。请运行 pnpm api:catalog`
+      );
+    }
+    return `${ROUTE_CATALOG.length} 个路由与模块文件一致`;
   });
 
   await check('设备注册 /register/dev', async () => {

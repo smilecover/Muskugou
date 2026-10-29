@@ -7,14 +7,21 @@
 
 import { defineStore } from 'pinia';
 import { computed, ref } from 'vue';
-import { readJson, STORAGE_KEYS, writeJson, type Song } from '@/api';
+import { cleanStoredSong, readJson, STORAGE_KEYS, writeJson, type Song } from '@/api';
 
 const MAX_HISTORY = 100;
 const MAX_SEARCH_HISTORY = 12;
 
 export const useLibraryStore = defineStore('library', () => {
-  const favorites = ref<Song[]>(readJson<Song[]>(STORAGE_KEYS.favorites, []));
-  const history = ref<Song[]>(readJson<Song[]>(STORAGE_KEYS.history, []));
+  // 旧版本可能把 "歌名.mp3" 写进本地数据，加载时统一清洗展示名
+  const savedFavorites = readJson<Song[]>(STORAGE_KEYS.favorites, []);
+  const savedHistory = readJson<Song[]>(STORAGE_KEYS.history, []);
+  const favorites = ref<Song[]>(
+    Array.isArray(savedFavorites) ? savedFavorites.map(cleanStoredSong) : [],
+  );
+  const history = ref<Song[]>(
+    Array.isArray(savedHistory) ? savedHistory.map(cleanStoredSong) : [],
+  );
   const searchHistory = ref<string[]>(readJson<string[]>(STORAGE_KEYS.searchHistory, []));
 
   const favoriteIds = computed(() => new Set(favorites.value.map((song) => song.id)));

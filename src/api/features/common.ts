@@ -66,8 +66,10 @@ export async function fallback<T>(task: () => Promise<T>, value: T): Promise<T> 
 /** 是否登录才能使用的接口错误 */
 export function isAuthError(error: unknown): boolean {
   const body = (error as any)?.body;
-  const code = body?.error_code ?? body?.errcode ?? (error as any)?.status;
-  return code === 20010 || code === 20018 || code === 20002 || code === 401;
+  const code = Number(body?.error_code ?? body?.errcode ?? (error as any)?.status);
+  return (
+    code === 20010 || code === 20017 || code === 20018 || code === 20002 || code === 401
+  );
 }
 
 /** 把歌手数组 / 字符串统一成“、”分隔的文本 */

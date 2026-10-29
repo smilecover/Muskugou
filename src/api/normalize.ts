@@ -126,6 +126,87 @@ function uniqueStrings(values: unknown[]): string[] {
   return [...new Set(values.map(toText).filter(Boolean))];
 }
 
+/**
+ * 部分接口会把嵌套字段序列化成 JSON 字符串。
+ *
+ * 例如 v3 云歌单偶尔返回 `trans_param: "{\"ogg_128_hash\":\"...\"}"`，
+ * 直接按对象读取会永远拿不到 OGG hash / 封面。这里只解析以 `{`、`[`
+ * 开头的字符串，普通歌名/歌手名不会被误解析。
+ */
+function parseStructured(value: any): any {
+  if (typeof value !== 'string') return value;
+  const raw = value.trim();
+  if (!raw || (raw[0] !== '{' && raw[0] !== '[')) return value;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return value;
+  }
+}
+
+/** 值 → 对象（JSON 字符串、数组和空值都返回空对象） */
+function asRecord(value: any): any {
+  const parsed = parseStructured(value);
+  return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+}
+
+/** 值 → 数组（单个对象会包成一项，JSON 字符串会被还原） */
+function asArray(value: any): any[] {
+  const parsed = parseStructured(value);
+  if (Array.isArray(parsed)) return parsed;
+  if (parsed === undefined || parsed === null || parsed === '') return [];
+  return [parsed];
+}
+
+/** 依次尝试多个取值，返回第一个非空对象 */
+function firstRecord(...values: any[]): any {
+  for (const value of values) {
+    const record = asRecord(value);
+    if (Object.keys(record).length) return record;
+  }
+  return {};
+}
+
+/**
+ * 歌曲对象里常见的嵌套结构。
+ *
+ * 各接口把同一份信息放在 `audio_info` / `song_info` / `album_info` /
+ * `album_info.album_info` 等不同位置，这里一次解析好，供后续提取函数复用。
+ */
+function songParts(raw: any): {
+  audioInfo: any;
+  songInfo: any;
+  albumInfo: any;
+  baseInfo: any;
+  transParam: any;
+  audioTransParam: any;
+  songTransParam: any;
+} {
+  const audioInfo = asRecord(raw?.audio_info);
+  const songInfo = asRecord(raw?.song_info);
+  const baseInfo = asRecord(raw?.base);
+  const albumInfo = firstRecord(
+    raw?.album_info,
+    raw?.albuminfo,
+    raw?.album,
+    audioInfo?.album_info,
+    audioInfo?.albuminfo,
+    audioInfo?.album,
+    songInfo?.album_info,
+    songInfo?.albuminfo,
+  );
+  return {
+    audioInfo,
+    songInfo,
+    albumInfo,
+    baseInfo,
+    // 相关版本等接口把 OGG/封面信息放在 copyright.trans_param 里
+    transParam: asRecord(raw?.trans_param) || asRecord(raw?.copyright?.trans_param),
+    audioTransParam: asRecord(audioInfo?.trans_param) || asRecord(audioInfo?.copyright?.trans_param),
+    songTransParam: asRecord(songInfo?.trans_param) || asRecord(songInfo?.copyright?.trans_param),
+  };
+}
+
 /** 判断数组里是否是歌曲对象 */
 function isSongLike(value: any): boolean {
   return Boolean(value && typeof value === 'object' && (value.hash || value.FileHash || value.hash_128 || value.audio_info));
@@ -135,104 +216,319 @@ function isSongLike(value: any): boolean {
 // 歌手 / 专辑 / 封面的通用提取
 // ---------------------------------------------------------------------------
 
+/**
+ * 单个歌手对象/字符串 → 歌手名。
+ *
+ * 酷狗不同接口的歌手字段差异很大：`author_name`、`singer_name`、
+ * `singername`、`name`，有时数组元素直接是字符串。统一在这里兼容。
+ */
+function artistNameOf(value: any): string {
+  if (typeof value === 'string') return value.trim();
+  if (value === undefined || value === null || typeof value !== 'object') return '';
+  const baseInfo = asRecord(value.base);
+  return toText(
+    firstValue(
+      value.author_name,
+      value.authorName,
+      value.singer_name,
+      value.singerName,
+      value.singername,
+      value.name,
+      value.nickname,
+      baseInfo.author_name,
+      baseInfo.singer_name,
+      baseInfo.name
+    )
+  );
+}
+
+/** 数组/单值 → 歌手名数组（元素可能是对象、字符串或 JSON 字符串） */
+function artistNamesOf(value: any): string[] {
+  const parsed = parseStructured(value);
+  if (Array.isArray(parsed)) return parsed.map(artistNameOf).filter(Boolean);
+  const name = artistNameOf(parsed);
+  return name ? [name] : [];
+}
+
+/** 单个歌手对象/字符串 → 歌手 id（字符串只接受纯数字，避免把歌手名当 id） */
+function artistIdOf(value: any): string {
+  const parsed = parseStructured(value);
+  if (typeof parsed === 'number') return toText(parsed);
+  if (typeof parsed === 'string') {
+    const text = parsed.trim();
+    return /^\d+$/.test(text) ? text : '';
+  }
+  if (!parsed || typeof parsed !== 'object') return '';
+  const baseInfo = asRecord(parsed.base);
+  return toText(
+    firstValue(
+      parsed.author_id,
+      parsed.authorId,
+      parsed.singer_id,
+      parsed.singerid,
+      parsed.singerId,
+      parsed.id,
+      baseInfo.author_id,
+      baseInfo.singer_id,
+      baseInfo.id
+    )
+  );
+}
+
+/** 数组/单值 → 歌手 id 数组 */
+function artistIdsOf(value: any): string[] {
+  const parsed = parseStructured(value);
+  if (Array.isArray(parsed)) return parsed.map(artistIdOf).filter(Boolean);
+  const id = artistIdOf(parsed);
+  return id ? [id] : [];
+}
+
+/** 音频扩展名（云歌单 v3 的 filename 字段会带扩展名） */
+const AUDIO_EXTENSION = /\.(mp3|flac|ogg|wav|m4a|aac|ape|wma|opus|dsf|dff|mgg|mflac|kgm|kgma)$/i;
+
+/**
+ * 去掉路径和音频扩展名，得到可展示的文件名。
+ *
+ * 云歌单 v3 返回的 `name` / `filename` 常带 `.mp3` 后缀，
+ * 直接展示会出现“光年之外.mp3”这种异常歌名。
+ */
+export function cleanSongName(value: unknown): string {
+  let text = toText(value);
+  if (!text) return '';
+  text = text.replace(/\\/g, '/');
+  const slash = text.lastIndexOf('/');
+  if (slash >= 0) text = text.slice(slash + 1);
+  return text.replace(AUDIO_EXTENSION, '').trim();
+}
+
+/**
+ * 去掉歌名前面的“歌手 - ”前缀。
+ *
+ * 仅当前缀确实等于某个歌手名时才去掉，避免误伤歌名本身含 " - " 的歌曲。
+ */
+export function stripArtistPrefix(songName: string, artistName: string): string {
+  const separator = songName.indexOf(' - ');
+  if (separator < 0) return songName;
+  const prefix = songName.slice(0, separator).replace(/\s+/g, '').toLowerCase();
+  const artistKeys = new Set(
+    [artistName, ...artistName.split(/[、,，&/]/)]
+      .map((item) => item.replace(/\s+/g, '').toLowerCase())
+      .filter(Boolean),
+  );
+  return artistKeys.has(prefix) ? songName.slice(separator + 3).trim() : songName;
+}
+
+/** 清洗歌名并去掉与歌手重复的前缀 */
+export function cleanSongDisplayName(songName: string, artistName: string): string {
+  return stripArtistPrefix(cleanSongName(songName), artistName);
+}
+
+/**
+ * 修正本地持久化歌曲的展示字段。
+ *
+ * 旧版本会把 "光年之外.mp3" 原样存入队列/历史/收藏；重新归一化会丢失
+ * fileId 等字段，因此这里只修正 name。
+ */
+export function cleanStoredSong(song: Song): Song {
+  const name = cleanSongDisplayName(song.name, song.artist) || song.name;
+  // 旧数据可能把 0 / "null" 当成封面保存
+  const cover = /^(0|null|undefined)$/i.test(song.cover || '') ? '' : song.cover;
+  return name !== song.name || cover !== song.cover ? { ...song, name, cover } : song;
+}
+
 function extractArtists(raw: any): { name: string; ids: string[] } {
-  const audioInfo = raw?.audio_info || raw?.song_info || {};
-  const authors = Array.isArray(raw?.authors)
-    ? raw.authors.map((author: any) => author?.author_name || author?.base?.author_name)
-    : [];
-  const singers = Array.isArray(raw?.Singers)
-    ? raw.Singers.map((singer: any) => singer?.name || singer?.singerName)
-    : [];
-  const singerInfo = Array.isArray(raw?.singerinfo)
-    ? raw.singerinfo.map((singer: any) => singer?.name || singer?.singername)
-    : [];
+  const { audioInfo, songInfo, albumInfo, baseInfo } = songParts(raw);
+
+  // 关注新歌等 feed 接口会把歌手放在数组/嵌套对象里，字段名也不固定
+  const names = [
+    ...artistNamesOf(raw?.authors),
+    ...artistNamesOf(raw?.Singers),
+    ...artistNamesOf(raw?.singers),
+    ...artistNamesOf(raw?.singerinfo),
+    ...artistNamesOf(raw?.singer_list),
+    ...artistNamesOf(raw?.artists),
+    ...artistNamesOf(audioInfo?.authors),
+    ...artistNamesOf(audioInfo?.singers),
+    ...artistNamesOf(audioInfo?.singerinfo),
+    ...artistNamesOf(audioInfo?.singer_list),
+    ...artistNamesOf(audioInfo?.singer),
+    ...artistNamesOf(songInfo?.authors),
+    ...artistNamesOf(songInfo?.singers),
+    ...artistNamesOf(songInfo?.singerinfo),
+    ...artistNamesOf(songInfo?.singer_list),
+    ...artistNamesOf(albumInfo?.authors),
+    ...artistNamesOf(albumInfo?.singers),
+    ...artistNamesOf(albumInfo?.singerinfo),
+    ...artistNamesOf(baseInfo?.authors),
+    ...artistNamesOf(baseInfo?.singers),
+    // 少数接口把 singer/artist 直接写成数组
+    ...artistNamesOf(raw?.singer),
+    ...artistNamesOf(raw?.artist),
+  ];
 
   let name = toText(
     firstValue(
       raw?.SingerName,
       raw?.singername,
+      raw?.singer_name,
+      raw?.singerName,
       raw?.author_name,
-      raw?.base?.author_name,
+      raw?.authorName,
+      raw?.artist_name,
+      raw?.artistName,
+      baseInfo?.author_name,
+      baseInfo?.singer_name,
       audioInfo?.author_name,
-      raw?.singer,
-      authors.length ? authors.join('、') : '',
-      singers.length ? singers.join('、') : '',
-      singerInfo.length ? singerInfo.join('、') : ''
+      audioInfo?.authorName,
+      audioInfo?.singer_name,
+      audioInfo?.singerName,
+      audioInfo?.singername,
+      songInfo?.author_name,
+      songInfo?.authorName,
+      songInfo?.singer_name,
+      songInfo?.singerName,
+      songInfo?.singername,
+      albumInfo?.author_name,
+      albumInfo?.singer_name,
+      artistNameOf(raw?.singer),
+      artistNameOf(raw?.artist),
+      names.join('、')
     )
   );
 
-  // 歌单接口的 name 常是 "歌手 - 歌名"，仅在完全没有歌手字段时兜底
-  if (!name && typeof raw?.name === 'string' && raw.name.includes(' - ')) {
-    name = raw.name.split(' - ')[0].trim();
+  // 歌单接口的 name / filename 常是 "歌手 - 歌名"，仅在完全没有歌手字段时兜底
+  if (!name) {
+    const fallbackName = cleanSongName(
+      firstValue(raw?.name, raw?.filename, raw?.FileName, raw?.file_name, raw?.orifilename),
+    );
+    if (fallbackName.includes(' - ')) {
+      name = fallbackName.split(' - ')[0].trim();
+    }
   }
 
   const ids = uniqueStrings([
     ...(Array.isArray(raw?.SingerId) ? raw.SingerId : [raw?.SingerId]),
-    ...(Array.isArray(raw?.Singers) ? raw.Singers.map((singer: any) => singer?.id) : []),
-    ...(Array.isArray(raw?.singerinfo) ? raw.singerinfo.map((singer: any) => singer?.id) : []),
-    ...(Array.isArray(raw?.authors)
-      ? raw.authors.map((author: any) => author?.author_id || author?.base?.author_id)
-      : []),
+    ...(Array.isArray(raw?.singerids) ? raw.singerids : [raw?.singerids]),
+    ...artistIdsOf(raw?.Singers),
+    ...artistIdsOf(raw?.singers),
+    ...artistIdsOf(raw?.singerinfo),
+    ...artistIdsOf(raw?.singer_list),
+    ...artistIdsOf(raw?.authors),
+    ...artistIdsOf(raw?.artists),
+    ...artistIdsOf(audioInfo?.authors),
+    ...artistIdsOf(audioInfo?.singers),
+    ...artistIdsOf(songInfo?.authors),
+    ...artistIdsOf(songInfo?.singers),
+    ...artistIdsOf(albumInfo?.authors),
+    ...artistIdsOf(albumInfo?.singers),
+    ...artistIdsOf(raw?.singer),
+    ...artistIdsOf(raw?.artist),
     raw?.singerid,
+    raw?.singer_id,
     raw?.author_id,
+    raw?.authorId,
     raw?.artist_id,
-    raw?.song_info?.author_id,
+    raw?.artistId,
+    baseInfo?.author_id,
+    songInfo?.author_id,
+    audioInfo?.author_id,
+    albumInfo?.author_id,
   ]).filter((id) => id !== '0');
 
   return { name: name || '未知歌手', ids };
 }
 
 function extractAlbumName(raw: any): string {
-  const audioInfo = raw?.audio_info || {};
+  const { audioInfo, songInfo, albumInfo, baseInfo } = songParts(raw);
   return toText(
     firstValue(
       raw?.AlbumName,
       raw?.album_name,
-      raw?.album_info?.album_name,
-      raw?.albuminfo?.name,
       raw?.albumname,
-      raw?.song_info?.album_name,
-      audioInfo?.album_name
+      raw?.albumName,
+      albumInfo?.album_name,
+      albumInfo?.albumname,
+      albumInfo?.name,
+      songInfo?.album_name,
+      songInfo?.albumname,
+      audioInfo?.album_name,
+      audioInfo?.albumname,
+      baseInfo?.album_name,
+      baseInfo?.albumname
     )
   );
 }
 
 function extractAlbumId(raw: any): string {
+  const { audioInfo, songInfo, albumInfo, baseInfo } = songParts(raw);
   return toText(
     firstValue(
       raw?.AlbumID,
       raw?.album_id,
-      raw?.album_info?.album_id,
-      raw?.albuminfo?.id,
-      raw?.base?.album_id,
-      raw?.song_info?.ori_album_id,
+      raw?.albumid,
+      raw?.albumId,
+      albumInfo?.album_id,
+      albumInfo?.albumid,
+      albumInfo?.id,
+      baseInfo?.album_id,
+      baseInfo?.albumid,
+      songInfo?.ori_album_id,
+      songInfo?.album_id,
+      songInfo?.albumid,
+      audioInfo?.ori_album_id,
+      audioInfo?.album_id,
+      audioInfo?.albumid,
       raw?.ori_album_id
     )
   );
 }
 
 function extractCover(raw: any): string {
-  const audioInfo = raw?.audio_info || {};
-  return normalizeImage(
+  const { audioInfo, songInfo, albumInfo, transParam, audioTransParam, songTransParam } = songParts(raw);
+  const cover = normalizeImage(
     firstValue(
-      raw?.trans_param?.union_cover,
-      raw?.album_info?.sizable_cover,
-      raw?.album_info?.cover,
-      raw?.song_info?.album_cover,
+      // 概念版优先使用 trans_param.union_cover（各音质共用一张封面）
+      transParam?.union_cover,
+      audioTransParam?.union_cover,
+      songTransParam?.union_cover,
+      albumInfo?.sizable_cover,
+      albumInfo?.sizableCover,
+      albumInfo?.imgurl,
+      albumInfo?.img,
+      albumInfo?.cover,
+      albumInfo?.pic,
+      albumInfo?.album_cover,
+      songInfo?.album_cover,
+      songInfo?.sizable_cover,
+      songInfo?.imgurl,
+      songInfo?.img,
+      songInfo?.cover,
+      songInfo?.pic,
+      raw?.sizable_cover,
+      raw?.sizableCover,
       raw?.AlbumImage,
       raw?.Image,
       raw?.imgurl,
+      raw?.img,
       raw?.cover,
+      raw?.cover_url,
       raw?.album_cover,
+      raw?.album_img,
       raw?.pic,
-      audioInfo?.cover
+      audioInfo?.cover,
+      audioInfo?.album_cover,
+      audioInfo?.sizable_cover,
+      audioInfo?.imgurl,
+      audioInfo?.img,
+      audioInfo?.pic
     )
   );
+  // 接口偶尔用 0 / "null" 表示没有封面，避免把它当成有效地址
+  return /^(0|null|undefined)$/i.test(cover) ? '' : cover;
 }
 
 function extractDuration(raw: any): number {
-  const audioInfo = raw?.audio_info || {};
-  const songInfo = raw?.song_info || {};
+  const { audioInfo, songInfo } = songParts(raw);
   const milliseconds = toNumber(
     firstValue(
       raw?.timelength,
@@ -240,14 +536,18 @@ function extractDuration(raw: any): number {
       raw?.timelength_128,
       raw?.timelength_320,
       raw?.timelength_flac,
+      raw?.timelength_high,
       raw?.timelen,
       raw?.duration,
       audioInfo?.duration_128,
       audioInfo?.timelength_128,
       audioInfo?.duration,
       audioInfo?.timelength,
+      audioInfo?.timelen,
       songInfo?.timelength_128,
-      songInfo?.timelength
+      songInfo?.timelength,
+      songInfo?.timelen,
+      songInfo?.duration
     )
   );
   if (milliseconds) return milliseconds;
@@ -258,56 +558,171 @@ function extractDuration(raw: any): number {
 }
 
 function qualityFromBitrate(bitrate: number): Quality {
-  if (bitrate >= 1400) return 'high';
-  if (bitrate >= 700) return 'flac';
-  if (bitrate >= 250) return '320';
+  // 少数接口用 bps（128000）而非 kbps 返回码率
+  const value = bitrate > 10_000 ? bitrate / 1000 : bitrate;
+  if (value >= 1400) return 'high';
+  if (value >= 700) return 'flac';
+  if (value >= 250) return '320';
   return '128';
 }
 
+/** relate_goods 的 level → App 音质（2=128、4=320、5=FLAC、6=Hi-Res、7=DSD） */
+function qualityFromLevel(level: number): Quality | null {
+  if (level === 1 || level === 2) return '128';
+  if (level === 4) return '320';
+  if (level === 5) return 'flac';
+  if (level === 6) return 'high';
+  if (level === 7) return 'super';
+  return null;
+}
+
+/** 音质字段文本 → App 音质（只认标准档位，避免把歌手名等文本误判） */
+function qualityFromText(value: unknown): Quality | null {
+  const text = toText(value).toLowerCase();
+  if (!text) return null;
+  if (text === '128' || text === '128k' || text === 'standard' || text === 'std') return '128';
+  if (text === '320' || text === '320k' || text === 'hq') return '320';
+  if (text === 'flac' || text === 'sq' || text === 'lossless') return 'flac';
+  if (text === 'high' || text === 'hi-res' || text === 'hires' || text === 'hr' || text === 'res') return 'high';
+  if (text === 'super' || text === 'dsd' || text === 'master' || text === 'viper_tape') return 'super';
+  return null;
+}
+
 function extractQualities(raw: any): SongQuality[] {
-  const audioInfo = raw?.audio_info || {};
-  const songInfo = raw?.song_info || {};
+  const { audioInfo, songInfo, transParam, audioTransParam, songTransParam } = songParts(raw);
 
   const map = new Map<Quality, SongQuality>();
-  const add = (quality: Quality, hash: unknown, size?: unknown) => {
+  const add = (quality: Quality | null, hash: unknown, size?: unknown) => {
+    if (!quality) return;
     const text = toText(hash);
     if (!text || map.has(quality)) return;
     map.set(quality, { quality, hash: text, size: toNumber(size) || undefined });
   };
 
+  // 1. 概念版 128/320 播放的是 OGG 资源：优先使用 trans_param 里的 ogg hash。
+  //    注意 song.hash 仍保持标准 hash，歌词/权益/鉴权接口需要它。
   add(
     '128',
-    firstValue(raw?.FileHash, raw?.hash, raw?.hash_128, audioInfo?.hash_128, audioInfo?.hash, songInfo?.hash_128),
+    firstValue(transParam?.ogg_128_hash, audioTransParam?.ogg_128_hash, songTransParam?.ogg_128_hash),
+    firstValue(transParam?.ogg_128_filesize, audioTransParam?.ogg_128_filesize, songTransParam?.ogg_128_filesize),
+  );
+  add(
+    '320',
+    firstValue(transParam?.ogg_320_hash, audioTransParam?.ogg_320_hash, songTransParam?.ogg_320_hash),
+    firstValue(transParam?.ogg_320_filesize, audioTransParam?.ogg_320_filesize, songTransParam?.ogg_320_filesize),
+  );
+
+  // 2. relate_goods：歌单接口通过它携带各音质 hash。
+  //    level=1 是概念版 128K OGG 资源，优先处理；level=2 是普通 128K MP3。
+  const relateGoods = [
+    ...asArray(raw?.relate_goods),
+    ...asArray(raw?.related_goods),
+    ...asArray(audioInfo?.relate_goods),
+    ...asArray(audioInfo?.related_goods),
+    ...asArray(songInfo?.relate_goods),
+  ].sort((a, b) => Number(toNumber(a?.level) !== 1) - Number(toNumber(b?.level) !== 1));
+
+  for (const goods of relateGoods) {
+    if (!goods || typeof goods !== 'object') continue;
+    const quality =
+      qualityFromText(goods.quality) ||
+      qualityFromLevel(toNumber(goods.level)) ||
+      qualityFromBitrate(toNumber(goods.bitrate));
+    add(
+      quality,
+      firstValue(goods.hash, goods.FileHash, goods.file_hash),
+      firstValue(goods.size, goods.filesize, goods.info?.filesize),
+    );
+  }
+
+  // 3. 已经整理好的 qualities 数组（如 /privilege/lite 的音质明细）
+  for (const item of [
+    ...asArray(raw?.qualities),
+    ...asArray(audioInfo?.qualities),
+    ...asArray(songInfo?.qualities),
+  ]) {
+    if (!item || typeof item !== 'object') continue;
+    const quality =
+      qualityFromText(item.quality) ||
+      qualityFromLevel(toNumber(item.level)) ||
+      qualityFromBitrate(toNumber(item.bitrate));
+    add(
+      quality,
+      firstValue(item.hash, item.FileHash),
+      firstValue(item.size, item.filesize, item.info?.filesize),
+    );
+  }
+
+  // 4. 各音质的扁平字段，作为最后的兜底
+  add(
+    '128',
+    firstValue(
+      raw?.FileHash,
+      raw?.hash,
+      raw?.hash_128,
+      audioInfo?.hash_128,
+      audioInfo?.hash,
+      songInfo?.hash_128,
+      songInfo?.hash,
+    ),
     firstValue(raw?.FileSize, raw?.filesize_128, audioInfo?.filesize_128, songInfo?.filesize_128),
   );
   add(
     '320',
-    firstValue(raw?.HQFileHash, raw?.hash_320, audioInfo?.hash_320, songInfo?.hash_320),
+    firstValue(
+      raw?.HQFileHash,
+      raw?.HQHash,
+      raw?.hqhash,
+      raw?.hash_320,
+      audioInfo?.HQFileHash,
+      audioInfo?.hash_320,
+      songInfo?.HQFileHash,
+      songInfo?.hash_320,
+    ),
     firstValue(raw?.HQFileSize, raw?.filesize_320, audioInfo?.filesize_320, songInfo?.filesize_320),
   );
   add(
     'flac',
-    firstValue(raw?.SQFileHash, raw?.hash_flac, audioInfo?.hash_flac, songInfo?.hash_flac),
+    firstValue(
+      raw?.SQFileHash,
+      raw?.SQHash,
+      raw?.sqhash,
+      raw?.hash_flac,
+      audioInfo?.SQFileHash,
+      audioInfo?.hash_flac,
+      songInfo?.SQFileHash,
+      songInfo?.hash_flac,
+    ),
     firstValue(raw?.SQFileSize, raw?.filesize_flac, audioInfo?.filesize_flac, songInfo?.filesize_flac),
   );
   add(
     'high',
-    firstValue(raw?.ResFileHash, raw?.hash_high, audioInfo?.hash_high, songInfo?.hash_high),
+    firstValue(
+      raw?.ResFileHash,
+      raw?.ResHash,
+      raw?.res_hash,
+      raw?.hash_high,
+      audioInfo?.ResFileHash,
+      audioInfo?.hash_high,
+      songInfo?.ResFileHash,
+      songInfo?.hash_high,
+    ),
     firstValue(raw?.ResFileSize, raw?.filesize_high, audioInfo?.filesize_high, songInfo?.filesize_high),
   );
   add(
     'super',
-    firstValue(raw?.SuperFileHash, raw?.hash_super, audioInfo?.hash_super, songInfo?.hash_super),
+    firstValue(
+      raw?.SuperFileHash,
+      raw?.SuperHash,
+      raw?.super_hash,
+      raw?.hash_super,
+      audioInfo?.SuperFileHash,
+      audioInfo?.hash_super,
+      songInfo?.SuperFileHash,
+      songInfo?.hash_super,
+    ),
     firstValue(raw?.SuperFileSize, raw?.filesize_super, audioInfo?.filesize_super, songInfo?.filesize_super),
   );
-
-  // 歌单接口通过 related_goods 提供多音质 hash
-  if (Array.isArray(raw?.relate_goods)) {
-    for (const goods of raw.relate_goods) {
-      if (!goods?.hash) continue;
-      add(qualityFromBitrate(toNumber(goods.bitrate)), goods.hash, goods.size);
-    }
-  }
 
   if (!map.size && raw?.hash) add('128', raw.hash);
 
@@ -323,55 +738,86 @@ function extractQualities(raw: any): SongQuality[] {
  * `source` 仅用于调试/统计，不影响逻辑。
  */
 export function normalizeSong(raw: any, source = 'unknown'): Song {
-  const audioInfo = raw?.audio_info || {};
+  const { audioInfo, songInfo, baseInfo, transParam, audioTransParam, songTransParam } = songParts(raw);
   const { name, ids } = extractArtists(raw);
   const qualities = extractQualities(raw);
   const defaultQuality = qualities.find((item) => item.quality === '128') || qualities[0];
 
   let songName =
-    toText(
+    cleanSongName(
       firstValue(
         raw?.SongName,
         raw?.songname,
         raw?.song_name,
+        raw?.songName,
         raw?.name,
         raw?.audio_name,
-        raw?.base?.audio_name,
+        raw?.audioName,
+        raw?.track_name,
+        raw?.title,
+        baseInfo?.audio_name,
+        baseInfo?.song_name,
+        // /audio/related 的 base 用 songname 而不是 song_name
+        baseInfo?.songname,
+        baseInfo?.songName,
+        baseInfo?.filename,
         raw?.FileName,
-        raw?.song_info?.songname
+        raw?.filename,
+        raw?.fileName,
+        raw?.file_name,
+        raw?.orifilename,
+        songInfo?.songname,
+        songInfo?.song_name,
+        songInfo?.audio_name,
+        audioInfo?.song_name,
+        audioInfo?.songname,
+        audioInfo?.audio_name,
+        audioInfo?.filename
       )
     ) || '未知歌曲';
 
-  // 歌单接口的 name 字段是“歌手 - 歌名”，歌手信息已单独展示；
-  // 仅当分隔符前缀确实等于歌手名时才去掉，避免误伤歌名本身含 " - " 的歌曲。
-  if (source === 'playlist' && songName.includes(' - ')) {
-    const separator = songName.indexOf(' - ');
-    const prefix = songName.slice(0, separator).replace(/\s+/g, '').toLowerCase();
-    const artistKey = name.replace(/\s+/g, '').toLowerCase();
-    if (artistKey && prefix === artistKey) {
-      songName = songName.slice(separator + 3).trim();
-    }
-  }
+  // 歌单/云歌单接口的 name 或 filename 常是“歌手 - 歌名”，去掉与歌手重复的前缀
+  songName = stripArtistPrefix(songName, name);
 
   const id = toText(
     firstValue(
       raw?.MixSongID,
       raw?.album_audio_id,
-      raw?.base?.album_audio_id,
-      raw?.song_info?.album_audio_id,
+      baseInfo?.album_audio_id,
+      songInfo?.album_audio_id,
       raw?.mixsongid,
       raw?.audio_id,
       raw?.Audioid,
       raw?.ID,
       raw?.hash,
       raw?.FileHash,
+      raw?.audio_id,
+      songInfo?.audio_id,
+      audioInfo?.audio_id,
       audioInfo?.hash_128
     )
   );
 
+  // 标准 hash 用于歌词/权益/鉴权；qualities 里的 128 可能是概念版 OGG hash，
+  // 因此不能用 defaultQuality 反推 song.hash。
+  const canonicalHash = toText(
+    firstValue(
+      raw?.FileHash,
+      raw?.hash,
+      raw?.hash_128,
+      audioInfo?.hash_128,
+      audioInfo?.hash,
+      songInfo?.hash_128,
+      songInfo?.hash,
+      transParam?.ogg_128_hash,
+      audioTransParam?.ogg_128_hash,
+      songTransParam?.ogg_128_hash,
+    ),
+  );
+
   return {
     id: id || defaultQuality?.hash || `${name}-${Math.random()}`,
-    hash: defaultQuality?.hash || toText(firstValue(raw?.FileHash, raw?.hash, audioInfo?.hash_128)),
+    hash: canonicalHash || defaultQuality?.hash || '',
     name: songName,
     artist: name,
     artistIds: ids,
@@ -381,10 +827,13 @@ export function normalizeSong(raw: any, source = 'unknown'): Song {
       firstValue(
         raw?.MixSongID,
         raw?.album_audio_id,
-        raw?.base?.album_audio_id,
-        raw?.song_info?.album_audio_id,
+        baseInfo?.album_audio_id,
+        songInfo?.album_audio_id,
         raw?.mixsongid,
-        raw?.audio_id
+        raw?.audio_id,
+        songInfo?.audio_id,
+        audioInfo?.album_audio_id,
+        audioInfo?.audio_id
       )
     ),
     cover: extractCover(raw),

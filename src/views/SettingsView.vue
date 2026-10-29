@@ -8,6 +8,7 @@
 
 import { useRouter } from 'vue-router';
 import {
+  Braces,
   ChevronRight,
   Crown,
   Database,
@@ -20,6 +21,7 @@ import {
   Server,
   ShieldAlert,
   SlidersHorizontal,
+  Smartphone,
   UserRound,
 } from 'lucide-vue-next';
 import CoverImage from '@/components/CoverImage.vue';
@@ -60,7 +62,7 @@ async function claimVip(): Promise<void> {
 function setQuality(value: Quality): void {
   if (value === settings.state.quality) return;
   settings.setQuality(value);
-  if (player.current) player.refreshQuality();
+  if (player.current) void player.refreshQuality();
   else toast.success('默认音质已更新');
 }
 
@@ -86,6 +88,23 @@ function logout(): void {
 function goLogin(): void {
   router.push('/login');
 }
+
+/** 点击头像进入主页；未登录时先去登录 */
+function goProfile(): void {
+  if (!user.loggedIn) {
+    goLogin();
+    return;
+  }
+  router.push(user.profile?.userid ? `/user/${user.profile.userid}` : '/user/me');
+}
+
+function goDevices(): void {
+  router.push('/devices');
+}
+
+function goApiCenter(): void {
+  router.push('/api-center');
+}
 </script>
 
 <template>
@@ -108,9 +127,14 @@ function goLogin(): void {
         <h2 class="settings-group__title">账号</h2>
         <div class="settings-card">
           <div class="account-row">
-            <div class="account-avatar">
+            <button
+              class="account-avatar"
+              type="button"
+              :aria-label="user.loggedIn ? '查看我的主页' : '登录账号'"
+              @click="goProfile"
+            >
               <CoverImage :src="user.avatar" :alt="user.nickname" :icon-size="22" />
-            </div>
+            </button>
             <div class="account-info">
               <p class="ellipsis">{{ user.nickname }}</p>
               <span>{{ user.loggedIn ? '酷狗账号已登录' : '登录后可同步歌单' }}</span>
@@ -121,6 +145,12 @@ function goLogin(): void {
               登录
             </button>
           </div>
+
+          <button v-if="user.loggedIn" class="setting-link" @click="goDevices">
+            <span class="setting-icon"><Smartphone :size="17" /></span>
+            <span>登录设备管理</span>
+            <ChevronRight :size="16" class="muted" />
+          </button>
 
           <button v-if="user.loggedIn" class="setting-link setting-link--danger" @click="logout">
             <span class="setting-icon"><LogOut :size="17" /></span>
@@ -284,6 +314,22 @@ function goLogin(): void {
         </div>
       </section>
 
+      <!-- 协议工具 -->
+      <section class="settings-group">
+        <h2 class="settings-group__title">
+          <Braces :size="14" />
+          协议工具
+        </h2>
+        <div class="settings-card">
+          <button class="setting-link" @click="goApiCenter">
+            <span class="setting-icon"><Braces :size="17" /></span>
+            <span>接口中心</span>
+            <span class="setting-link__note">浏览与调试</span>
+            <ChevronRight :size="16" class="muted" />
+          </button>
+        </div>
+      </section>
+
       <!-- 数据 -->
       <section class="settings-group">
         <h2 class="settings-group__title">
@@ -334,7 +380,8 @@ function goLogin(): void {
             <ShieldAlert :size="16" />
             <p>
               本项目仅供个人学习与技术研究，音乐版权归酷狗音乐及版权方所有。
-              请勿用于商业用途或大规模抓取。登录仅支持扫码，不会触发短信。
+              请勿用于商业用途或大规模抓取。登录页支持扫码、短信验证码、账号密码等方式，
+              短信只会在你主动点击发送后发出；接口中心会直接调用协议接口，请谨慎操作。
             </p>
           </div>
         </div>
@@ -446,9 +493,11 @@ function goLogin(): void {
   flex: 0 0 auto;
   width: 46px;
   height: 46px;
+  padding: 0;
   overflow: hidden;
   border-radius: 50%;
   background: var(--surface);
+  cursor: pointer;
 }
 
 .account-info {
@@ -646,6 +695,12 @@ function goLogin(): void {
 
 .setting-link > span:nth-child(2) {
   flex: 1;
+}
+
+.setting-link__note {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 10px;
 }
 
 .setting-link--danger {

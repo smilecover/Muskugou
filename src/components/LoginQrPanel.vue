@@ -14,6 +14,7 @@ withDefaults(
     alt?: string;
     loading?: boolean;
     loadingText?: string;
+    emptyText?: string;
     message?: string;
     overlay?: 'scanned' | 'expired' | null;
     overlayTitle?: string;
@@ -25,6 +26,7 @@ withDefaults(
     alt: '登录二维码',
     loading: false,
     loadingText: '正在生成二维码',
+    emptyText: '二维码加载失败，请刷新',
     message: '',
     overlay: null,
     overlayTitle: '二维码已过期',
@@ -42,8 +44,8 @@ defineEmits<{ refresh: [] }>();
     <div class="qr-frame">
       <img v-if="image" :src="image" :alt="alt" draggable="false" />
       <div v-else class="qr-loading">
-        <span class="spinner" />
-        {{ loadingText }}
+        <span v-if="loading" class="spinner" />
+        {{ loading ? loadingText : emptyText }}
       </div>
 
       <div v-if="overlay === 'scanned'" class="qr-overlay">

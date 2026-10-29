@@ -15,11 +15,14 @@
 import { defineStore } from 'pinia';
 import { computed, ref } from 'vue';
 import {
+  cleanStoredSong,
+  clearQualityCaches,
   clearUrlCache,
   getLyric,
   getSettings,
   getSongUrl,
   onAuthChange,
+  QUALITY_RANK,
   readJson,
   STORAGE_KEYS,
   toErrorMessage,
@@ -43,6 +46,13 @@ interface PersistedPlayer {
 
 const MODES: PlayMode[] = ['list', 'single', 'shuffle'];
 const DEFAULT_VOLUME = 0.8;
+const QUALITY_LABELS: Record<Quality, string> = {
+  '128': '标准 128K',
+  '320': '高品质 320K',
+  flac: '无损 FLAC',
+  high: 'Hi-Res',
+  super: '超品',
+};
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -64,7 +74,9 @@ export const usePlayerStore = defineStore('player', () => {
   const savedQueue = readJson<Song[]>(STORAGE_KEYS.queue, []);
   const savedPlayer = readJson<Partial<PersistedPlayer>>(STORAGE_KEYS.player, {});
 
-  const queue = ref<Song[]>(Array.isArray(savedQueue) ? savedQueue.filter(isSong) : []);
+  const queue = ref<Song[]>(
+    Array.isArray(savedQueue) ? savedQueue.filter(isSong).map(cleanStoredSong) : [],
+  );
   const mode = ref<PlayMode>(MODES.includes(savedPlayer.mode as PlayMode) ? (savedPlayer.mode as PlayMode) : 'list');
   const volume = ref(clamp(Number(savedPlayer.volume ?? DEFAULT_VOLUME), 0, 1));
 
@@ -373,7 +385,6 @@ export const usePlayerStore = defineStore('player', () => {
     persistPlayer();
 
     const token = (loadToken += 1);
-    library.addHistory(song);
     updateMediaSession();
     void loadLyric(song, token);
 
@@ -390,6 +401,9 @@ export const usePlayerStore = defineStore('player', () => {
     }
 
     if (token !== loadToken) return;
+
+    // 取地址过程中 song 可能已补齐音质/封面，此时再写入历史可保存完整信息
+    library.addHistory(song);
 
     const element = ensureAudio();
     if (!element) {
@@ -503,6 +517,33 @@ export const usePlayerStore = defineStore('player', () => {
       return;
     }
     await playSongs([song], 0);
+  }
+
+  /**
+   * 播放临时插入的歌曲（搜索结果的点击行为）。
+   *
+   * 与 `playSongs` 不同，这里保留当前播放队列：歌曲插到当前歌曲之后并立即播放，
+   * 已经在队列里则直接跳过去。这样搜索试听不会冲掉正在听的歌单。
+   */
+  async function playInserted(song: Song): Promise<void> {
+    if (!isSong(song)) return;
+    const existing = queue.value.findIndex((item) => item.id === song.id);
+    if (existing >= 0) {
+      await loadAt(existing);
+      return;
+    }
+    if (!queue.value.length) {
+      await playSongs([song], 0);
+      return;
+    }
+    const insertAt = index.value + 1;
+    const nextQueue = [...queue.value];
+    nextQueue.splice(insertAt, 0, song);
+    queue.value = nextQueue;
+    // 插入会让后续下标整体后移，随机播放的历史下标不再可靠
+    shuffleHistory.length = 0;
+    persistQueue();
+    await loadAt(insertAt);
   }
 
   /** 插入到当前歌曲之后 */
@@ -690,11 +731,74 @@ export const usePlayerStore = defineStore('player', () => {
     return nextMode;
   }
 
-  /** 切换音质：清空地址缓存，下一首生效 */
-  function refreshQuality(): void {
+  /**
+   * 切换音质：立即为当前歌曲重新获取播放地址。
+   *
+   * 新地址就绪前不打断正在播放的音频；拿到地址后再切换，并恢复进度与
+   * 播放状态。目标音质不可用时 `getSongUrl` 会自动向下回退，toast 里
+   * 显示实际生效的音质。
+   */
+  async function refreshQuality(): Promise<void> {
     clearUrlCache();
-    if (!current.value) return;
-    toast.info(`音质已切换为 ${getSettings().quality.toUpperCase()}，将在下一首生效`);
+    const song = current.value;
+    if (!song) return;
+
+    const token = loadToken;
+    const wasPlaying = playing.value || wantsPlayback;
+    const position =
+      audio && Number.isFinite(audio.currentTime) ? audio.currentTime : currentTime.value;
+
+    try {
+      const playable = await getSongUrl(song, getSettings().quality, true);
+      // 等待期间用户可能已经切歌
+      if (token !== loadToken || current.value !== song) return;
+
+      const element = ensureAudio();
+      if (!element) return;
+
+      preview.value = playable.preview;
+      freeListen.value = playable.freeListen;
+      currentQuality.value = playable.quality;
+      error.value = '';
+      lastAudioError = '';
+      lastFailedUrl = '';
+      alternateUrls = [...new Set([playable.url, ...playable.fallbackUrls].filter(Boolean))];
+      alternateIndex = 0;
+      wantsPlayback = wasPlaying;
+      loading.value = true;
+      element.src = alternateUrls[0];
+
+      // load() 会重置进度：先同步设置一次，元数据就绪后再对齐
+      const restore = () => {
+        try {
+          element.currentTime = position;
+        } catch {
+          // 元数据未就绪时设置进度可能失败，等 loadedmetadata 再对齐
+        }
+      };
+      element.addEventListener('loadedmetadata', restore, { once: true });
+      element.load();
+      restore();
+
+      if (wasPlaying) {
+        await playAudio();
+      } else {
+        loading.value = false;
+      }
+
+      const actualLabel = QUALITY_LABELS[playable.quality] || playable.quality;
+      const requested = getSettings().quality;
+      if (QUALITY_RANK[playable.quality] < QUALITY_RANK[requested]) {
+        // 目标音质不可用（未登录/未领 VIP/歌曲无该音质）时说明回退原因
+        toast.info(`已切换为${actualLabel}（${QUALITY_LABELS[requested]}暂不可用）`);
+      } else {
+        toast.success(`音质已切换为${actualLabel}`);
+      }
+    } catch (err) {
+      if (token !== loadToken) return;
+      loading.value = false;
+      toast.error(toErrorMessage(err));
+    }
   }
 
   /** 从队列第 `targetIndex` 首开始播放 */
@@ -703,8 +807,11 @@ export const usePlayerStore = defineStore('player', () => {
     await loadAt(targetIndex);
   }
 
-  // 登录状态变化后，之前缓存的试听地址可能已经能用完整版替换
-  onAuthChange(() => clearUrlCache());
+  // 登录状态变化后，之前缓存的试听地址/权益信息可能已经变化
+  onAuthChange(() => {
+    clearUrlCache();
+    clearQualityCaches();
+  });
 
   return {
     // 状态
@@ -735,6 +842,7 @@ export const usePlayerStore = defineStore('player', () => {
     // 操作
     playSongs,
     playSong,
+    playInserted,
     playNext,
     removeFromQueue,
     clearQueue,

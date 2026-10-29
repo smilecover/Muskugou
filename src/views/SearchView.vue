@@ -316,7 +316,8 @@ function playLyric(item: LyricSearchItem): void {
     privilege: 0,
     source: 'lyric-search',
   };
-  void player.playSongs([song], 0);
+  // 歌词搜索结果同样只插入当前队列，不打断正在播放的歌单
+  void player.playInserted(song);
 }
 
 watch(keyword, (value) => {
@@ -450,6 +451,7 @@ onMounted(() => {
               :songs="results.song"
               :loading="loading"
               :show-index="false"
+              insert-queue
               show-cover
               empty-title="没有找到相关歌曲"
               empty-desc="换个关键词试试"

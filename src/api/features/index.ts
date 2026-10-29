@@ -6,6 +6,7 @@
 
 export * from './common';
 export * from './auth';
+export * from './device';
 export * from './discover';
 export * from './audiobook';
 export * from './video';
@@ -13,4 +14,5 @@ export * from './comments';
 export * from './playlist';
 export * from './user';
 export * from './song';
+export * from './quality';
 export * from './search';

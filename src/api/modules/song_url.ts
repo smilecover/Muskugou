@@ -28,6 +28,15 @@ export default (params: any, useAxios: UseAxios): Promise<any> => {
   const ppage_id = isLite
     ? (params.ppage_id || '356753938,823673182,967485191')
     : '463467626,350369493,788954147';
+  // 概念版的标准/高品质资源是 OGG；无损及以上没有 OGG 版本，保持普通请求
+  const isStandardQuality =
+    quality === undefined ||
+    quality === null ||
+    quality === '' ||
+    quality === '128' ||
+    quality === '320' ||
+    quality === 128 ||
+    quality === 320;
 
   const dataMap = {
     album_id: Number(params.album_id ?? 0),
@@ -36,6 +45,8 @@ export default (params: any, useAxios: UseAxios): Promise<any> => {
     ssa_flag: 'is_fromtrack',
     version: 11430,
     page_id,
+    // 概念版的标准/高品质资源是 OGG，请求时带上 need_ogg 才会返回对应文件
+    need_ogg: isLite && isStandardQuality ? 1 : 0,
     quality: quality || 128,
     album_audio_id: Number(params.album_audio_id ?? 0),
 

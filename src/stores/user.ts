@@ -13,6 +13,7 @@ import {
   clearAuth,
   createLoginQr,
   ensureUserAuth,
+  getUserGrade,
   getUserPlaylists,
   getUserProfile,
   hasLogin,
@@ -20,6 +21,7 @@ import {
   toErrorMessage,
   type LoginQr,
   type Playlist,
+  type UserGrade,
   type UserProfile,
 } from '@/api';
 import { useToastStore } from './toast';
@@ -30,6 +32,9 @@ export const useUserStore = defineStore('user', () => {
   const loggedIn = ref(hasLogin());
   const profile = ref<UserProfile | null>(null);
   const playlists = ref<Playlist[]>([]);
+  const grade = ref<UserGrade | null>(null);
+  const gradeLoading = ref(false);
+  const gradeError = ref('');
   const loading = ref(false);
   /** 任意方式登录成功后的统一收尾（刷新 auth / 资料 / 歌单） */
   const finishing = ref(false);
@@ -41,6 +46,8 @@ export const useUserStore = defineStore('user', () => {
 
   let pollTimer: number | null = null;
   let polling = false;
+  /** 二维码生成请求令牌：切换登录方式时作废仍在途的 createLoginQr */
+  let loginToken = 0;
 
   const nickname = computed(() => profile.value?.nickname || (loggedIn.value ? '酷狗用户' : '未登录'));
   const avatar = computed(() => profile.value?.avatar || '');
@@ -48,6 +55,28 @@ export const useUserStore = defineStore('user', () => {
   function resetUser(): void {
     profile.value = null;
     playlists.value = [];
+    grade.value = null;
+    gradeError.value = '';
+  }
+
+  /** 单独刷新听歌等级；失败只记录错误，不影响其它资料 */
+  async function refreshGrade(): Promise<void> {
+    if (gradeLoading.value) return;
+    if (!hasLogin()) {
+      grade.value = null;
+      gradeError.value = '';
+      return;
+    }
+
+    gradeLoading.value = true;
+    gradeError.value = '';
+    try {
+      grade.value = await getUserGrade();
+    } catch (error) {
+      gradeError.value = toErrorMessage(error);
+    } finally {
+      gradeLoading.value = false;
+    }
   }
 
   async function refresh(): Promise<void> {
@@ -63,6 +92,8 @@ export const useUserStore = defineStore('user', () => {
       const [nextProfile, nextPlaylists] = await Promise.all([
         getUserProfile().catch(() => null),
         getUserPlaylists().catch(() => []),
+        // refreshGrade 自己吞掉错误，等级接口失败不会阻断资料与歌单
+        refreshGrade(),
       ]);
       profile.value = nextProfile;
       playlists.value = nextPlaylists;
@@ -129,22 +160,37 @@ export const useUserStore = defineStore('user', () => {
 
   async function startLogin(): Promise<void> {
     if (loggedIn.value) return;
+    const token = (loginToken += 1);
     stopPolling();
     qr.value = null;
     qrStatus.value = -1;
     qrMessage.value = '';
     qrLoading.value = true;
     try {
-      qr.value = await createLoginQr();
+      const nextQr = await createLoginQr();
+      // 期间用户可能切换到其它登录方式，旧请求直接丢弃
+      if (token !== loginToken) return;
+      qr.value = nextQr;
       qrStatus.value = 1;
       qrMessage.value = '请使用酷狗音乐 App 扫码';
       pollTimer = window.setInterval(() => void pollOnce(), 2000);
     } catch (error) {
+      if (token !== loginToken) return;
       qrMessage.value = toErrorMessage(error);
       toast.error(qrMessage.value);
     } finally {
-      qrLoading.value = false;
+      if (token === loginToken) qrLoading.value = false;
     }
+  }
+
+  /**
+   * 离开扫码方式时调用：停止轮询，并作废仍在途的二维码生成请求。
+   * 与 stopPolling 的区别是它会递增令牌，避免旧请求回来后重新开始轮询。
+   */
+  function cancelLogin(): void {
+    loginToken += 1;
+    stopPolling();
+    qrLoading.value = false;
   }
 
   /**
@@ -181,6 +227,9 @@ export const useUserStore = defineStore('user', () => {
     loggedIn,
     profile,
     playlists,
+    grade,
+    gradeLoading,
+    gradeError,
     loading,
     finishing,
     nickname,
@@ -191,8 +240,10 @@ export const useUserStore = defineStore('user', () => {
     qrLoading,
     init,
     refresh,
+    refreshGrade,
     completeLogin,
     startLogin,
+    cancelLogin,
     resumePolling,
     refreshQr,
     pollOnce,

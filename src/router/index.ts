@@ -190,6 +190,25 @@ const routes: RouteRecordRaw[] = [
     meta: { title: '账号' },
   },
   {
+    // /user/me 表示当前登录账号；其它 id 表示查看他人主页
+    path: '/user/:id',
+    name: 'user-home',
+    component: () => import('@/views/UserProfileView.vue'),
+    meta: { title: '主页' },
+  },
+  {
+    path: '/devices',
+    name: 'devices',
+    component: () => import('@/views/DevicesView.vue'),
+    meta: { title: '登录设备' },
+  },
+  {
+    path: '/api-center',
+    name: 'api-center',
+    component: () => import('@/views/ApiCenterView.vue'),
+    meta: { title: '接口中心' },
+  },
+  {
     path: '/:pathMatch(.*)*',
     redirect: '/',
   },

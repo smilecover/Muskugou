@@ -21,6 +21,8 @@ export default (params: any, useAxios: UseAxios): Promise<any> => {
     area_code: 1,
     allplatform: 1,
     show_cover: 1,
+    // 返回各音质的 relate_goods（含 OGG/320K 无损 hash），否则云歌单只有 128K
+    show_relate_goods: 1,
     token,
   };
 

@@ -95,6 +95,16 @@ export function setCookieStrings(cookies: string[], platform: Platform = getSett
     const key = first.slice(0, index).trim();
     const value = first.slice(index + 1).trim();
     if (!key) continue;
+
+    /*
+     * 模块层用模板字符串拼 Cookie，字段缺失时可能产生 "undefined"/"null"。
+     * 这类值一旦覆盖 token/userid 会让登录态直接失效（刷新登录接口尤其
+     * 容易遇到），落库前统一丢弃。空 token/userid 与 userid=0 同理。
+     */
+    if (value === 'undefined' || value === 'null') continue;
+    if ((key === 'token' || key === 'userid' || key === 't1') && !value) continue;
+    if (key === 'userid' && value === '0') continue;
+
     jar[key] = value;
     changed = true;
   }

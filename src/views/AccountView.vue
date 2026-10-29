@@ -3,7 +3,7 @@
  * 账号页。
  *
  * 展示当前概念版账号的资料、会员状态，以及关注、粉丝、已购单曲/专辑。
- * 酷狗只允许读取当前登录账号的资料，因此未登录时全部引导到扫码登录。
+ * 酷狗只允许读取当前登录账号的资料，因此未登录时全部引导到登录页。
  */
 
 import { computed, onMounted, reactive, ref, watch } from 'vue';
@@ -16,12 +16,14 @@ import {
   LogIn,
   LogOut,
   Settings,
+  Smartphone,
   UserRound,
 } from 'lucide-vue-next';
 import AlbumCard from '@/components/AlbumCard.vue';
 import CoverImage from '@/components/CoverImage.vue';
 import DetailHeader from '@/components/DetailHeader.vue';
 import SongList from '@/components/SongList.vue';
+import UserLevelCard from '@/components/UserLevelCard.vue';
 import {
   followUser,
   getFans,
@@ -30,6 +32,7 @@ import {
   getPurchasedAlbums,
   getPurchasedSongs,
   getVisitors,
+  rememberUser,
   toErrorMessage,
   unfollowUser,
   type Album,
@@ -103,6 +106,18 @@ const peopleEmpty = computed(() => {
 const profile = computed(() => user.profile);
 const fanCount = computed(() => profile.value?.fans || fans.value.length);
 const followCount = computed(() => profile.value?.follows || following.value.length);
+
+/** 进入自己的主页（详情页会补充等级与公开音乐） */
+function openProfile(): void {
+  router.push(user.profile?.userid ? `/user/${user.profile.userid}` : '/user/me');
+}
+
+/** 从关注/粉丝列表进入对方主页；缓存列表里的资料作为兜底 */
+function openUser(person: PublicUser): void {
+  if (!person.id) return;
+  rememberUser(person);
+  router.push(`/user/${person.id}`);
+}
 
 async function loadTab(key: AccountTab, force = false): Promise<void> {
   if (!user.loggedIn) return;
@@ -184,6 +199,7 @@ function logout(): void {
 onMounted(async () => {
   if (!user.loggedIn) return;
   if (!user.profile) await user.refresh().catch(() => null);
+  else if (!user.grade && !user.gradeError) void user.refreshGrade();
   if (!membership.loaded) void membership.refresh();
   await loadTab(tab.value);
 });
@@ -202,7 +218,7 @@ onMounted(async () => {
     <section v-if="!user.loggedIn" class="account-login panel">
       <span class="account-login__icon"><UserRound :size="26" :stroke-width="1.6" /></span>
       <p class="account-login__title">还没有登录</p>
-      <p class="account-login__desc">扫码登录后可以查看关注、粉丝与已购内容</p>
+      <p class="account-login__desc">登录后可以查看关注、粉丝与已购内容</p>
       <button class="btn btn--primary btn--sm" @click="router.push('/login')">
         <LogIn :size="14" />
         去登录
@@ -212,9 +228,14 @@ onMounted(async () => {
     <template v-else>
       <!-- 资料 -->
       <section class="account-hero">
-        <div class="account-hero__avatar">
+        <button
+          class="account-hero__avatar"
+          type="button"
+          aria-label="查看我的主页"
+          @click="openProfile"
+        >
           <CoverImage :src="user.avatar" :alt="user.nickname" :icon-size="26" />
-        </div>
+        </button>
         <div class="account-hero__info">
           <p class="account-hero__name ellipsis">{{ user.nickname }}</p>
           <p class="account-hero__sub ellipsis">
@@ -227,6 +248,16 @@ onMounted(async () => {
           </div>
         </div>
       </section>
+
+      <!-- 听歌等级 -->
+      <UserLevelCard
+        class="account-level"
+        :grade="user.grade"
+        :loading="user.gradeLoading"
+        :error="user.gradeError"
+        refreshable
+        @retry="user.refreshGrade"
+      />
 
       <!-- 会员 -->
       <section class="account-vip">
@@ -277,13 +308,23 @@ onMounted(async () => {
         <!-- 关注 / 粉丝 / 好友 / 访客 -->
         <div v-if="tab !== 'songs' && tab !== 'albums'" class="user-list">
           <div v-for="person in people" :key="person.id" class="user-row">
-            <div class="user-row__avatar">
-              <CoverImage :src="person.avatar" :alt="person.name" :icon-size="20" />
-            </div>
-            <div class="user-row__info">
-              <p class="user-row__name ellipsis">{{ person.name }}</p>
-              <p class="user-row__sign ellipsis">{{ person.signature || '这个人很神秘' }}</p>
-            </div>
+            <button
+              class="user-row__identity"
+              type="button"
+              :disabled="!person.id"
+              :aria-label="`查看 ${person.name} 的主页`"
+              @click="openUser(person)"
+            >
+              <span class="user-row__avatar">
+                <CoverImage :src="person.avatar" :alt="person.name" :icon-size="20" />
+              </span>
+              <span class="user-row__info">
+                <span class="user-row__name ellipsis">{{ person.name }}</span>
+                <span class="user-row__sign ellipsis">
+                  {{ person.signature || '这个人很神秘' }}
+                </span>
+              </span>
+            </button>
             <button
               v-if="tab === 'following'"
               class="user-row__action"
@@ -329,6 +370,12 @@ onMounted(async () => {
           </div>
         </div>
       </template>
+
+      <button class="account-devices" @click="router.push('/devices')">
+        <Smartphone :size="16" />
+        登录设备管理
+        <ChevronRight :size="15" class="muted" />
+      </button>
 
       <button class="account-logout" @click="logout">
         <LogOut :size="16" />
@@ -383,10 +430,16 @@ onMounted(async () => {
   flex: 0 0 auto;
   width: 68px;
   height: 68px;
+  padding: 0;
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 50%;
   background: var(--surface);
+  cursor: pointer;
+}
+
+.account-level {
+  margin: 0 18px 12px;
 }
 
 .account-hero__info {
@@ -559,7 +612,27 @@ onMounted(async () => {
   border-radius: 14px;
 }
 
+.user-row__identity {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: center;
+  gap: 11px;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  font-family: inherit;
+  text-align: left;
+  background: none;
+  cursor: pointer;
+}
+
+.user-row__identity:disabled {
+  cursor: default;
+}
+
 .user-row__avatar {
+  display: block;
   flex: 0 0 auto;
   width: 44px;
   height: 44px;
@@ -569,17 +642,20 @@ onMounted(async () => {
 }
 
 .user-row__info {
+  display: block;
   flex: 1;
   min-width: 0;
 }
 
 .user-row__name {
+  display: block;
   margin: 0;
   font-size: 13px;
   font-weight: 600;
 }
 
 .user-row__sign {
+  display: block;
   margin: 2px 0 0;
   color: var(--muted);
   font-size: 10.5px;
@@ -617,6 +693,26 @@ onMounted(async () => {
   width: 100%;
 }
 
+.account-devices {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: calc(100% - 36px);
+  margin: 28px 18px 0;
+  padding: 12px;
+  border: 1px solid rgba(56, 225, 198, 0.2);
+  border-radius: 14px;
+  color: var(--accent);
+  font-size: 12.5px;
+  font-weight: 600;
+  background: rgba(56, 225, 198, 0.045);
+}
+
+.account-devices .muted {
+  margin-left: 2px;
+}
+
 .account-logout {
   display: flex;
   align-items: center;
@@ -631,5 +727,9 @@ onMounted(async () => {
   font-size: 12.5px;
   font-weight: 600;
   background: rgba(255, 99, 119, 0.05);
+}
+
+.account-devices + .account-logout {
+  margin-top: 10px;
 }
 </style>

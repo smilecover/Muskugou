@@ -23,6 +23,15 @@ export function formatSeconds(seconds: number | undefined | null): string {
   return formatDuration((seconds || 0) * 1000);
 }
 
+/** 秒 -> 累计听歌时长（x 小时 y 分 / y 分钟） */
+export function formatListenTime(seconds: number | undefined | null): string {
+  const totalMinutes = Math.max(0, Math.floor((seconds || 0) / 60));
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  if (hours > 0) return minutes ? `${hours} 小时 ${minutes} 分` : `${hours} 小时`;
+  return `${totalMinutes} 分钟`;
+}
+
 /** ISO/时间戳 -> YYYY-MM-DD */
 export function formatDate(value: string | number | undefined | null): string {
   if (!value) return '';

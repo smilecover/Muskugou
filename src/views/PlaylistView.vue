@@ -17,6 +17,7 @@ import {
   collectPlaylist,
   deletePlaylist,
   fallback,
+  getPlaylistAllSongs,
   getPlaylistPage,
   getSimilarPlaylists,
   removeSongsFromPlaylist,
@@ -52,6 +53,9 @@ const loadingMore = ref(false);
 const error = ref('');
 
 let requestToken = 0;
+/** 播放队列缓存：详情页只展示已加载的歌曲，但队列需要整个歌单 */
+let fullQueue: Song[] | null = null;
+let fullQueueLoaded = false;
 
 const hasMore = computed(() => songs.value.length > 0 && songs.value.length < total.value);
 
@@ -64,6 +68,8 @@ async function loadInitial(): Promise<void> {
   page.value = 0;
   playlist.value = null;
   similar.value = [];
+  fullQueue = null;
+  fullQueueLoaded = false;
 
   // 相似歌单与主内容并行请求，失败时隐藏区块
   if (!isUserList.value) void loadSimilar();
@@ -111,16 +117,51 @@ async function loadMore(): Promise<void> {
   }
 }
 
-function playAll(): void {
-  if (!songs.value.length) return;
-  void player.playSongs(songs.value, 0);
+/**
+ * 返回整个歌单作为播放队列。
+ *
+ * 首屏只有 50 首（分页加载），直接拿 `songs` 当队列会导致播到第 50 首就停；
+ * 这里一次性补齐剩余分页，并把已经加载/补齐过封面的对象合并回去。
+ */
+async function loadAllSongs(): Promise<Song[]> {
+  if (fullQueueLoaded && fullQueue) return fullQueue;
+
+  // 全部歌曲已经加载完（或接口没有给出总数）时直接使用当前列表
+  if (!total.value || songs.value.length >= total.value) {
+    fullQueue = songs.value;
+    fullQueueLoaded = true;
+    return fullQueue;
+  }
+
+  toast.info('正在加载完整歌单…');
+  const result = await getPlaylistAllSongs(props.id);
+  const loaded = new Map(songs.value.map((song) => [song.id, song]));
+  fullQueue = result.songs.map((song) => loaded.get(song.id) || song);
+  fullQueueLoaded = true;
+  if (result.truncated) toast.info('歌单歌曲过多，播放队列最多包含 5000 首');
+  return fullQueue;
 }
 
-function shufflePlay(): void {
+async function playAll(): Promise<void> {
+  if (!songs.value.length) return;
+  try {
+    const all = await loadAllSongs();
+    await player.playSongs(all, 0);
+  } catch (err) {
+    toast.error(toErrorMessage(err));
+  }
+}
+
+async function shufflePlay(): Promise<void> {
   if (!songs.value.length) return;
   player.setMode('shuffle');
-  const start = Math.floor(Math.random() * songs.value.length);
-  void player.playSongs(songs.value, start);
+  try {
+    const all = await loadAllSongs();
+    const start = Math.floor(Math.random() * all.length);
+    await player.playSongs(all, start);
+  } catch (err) {
+    toast.error(toErrorMessage(err));
+  }
 }
 
 /** 收藏公开歌单到当前账号 */
@@ -153,6 +194,8 @@ async function removeSong(song: Song): Promise<void> {
     await removeSongsFromPlaylist(props.id, [song.fileId]);
     songs.value = songs.value.filter((item) => item.id !== song.id);
     total.value = Math.max(0, total.value - 1);
+    fullQueue = null;
+    fullQueueLoaded = false;
     toast.success('已从歌单移除');
   } catch (err) {
     toast.error(toErrorMessage(err));
@@ -283,6 +326,7 @@ onMounted(() => void loadInitial());
         <SongList
           :songs="songs"
           :loading="loading"
+          :queue-loader="loadAllSongs"
           show-index
           empty-title="这个歌单还没有歌曲"
           empty-desc="换一个歌单试试吧"

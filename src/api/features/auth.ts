@@ -18,9 +18,10 @@
 
 import qrcode from '../core/node/qrcode';
 import { cookieToJson } from '../core/util';
-import { setCookieObject } from '../core/jar';
-import type { KuGouResponse } from '../core/types';
+import { getAuth, setCookieObject } from '../core/jar';
+import { KuGouApiError, type KuGouResponse } from '../core/types';
 import { callModule } from '../registry';
+import { ensureDfid } from '../client';
 
 /** 登录方式（与登录页的 Tab 一一对应） */
 export type LoginMethod = 'qr' | 'phone' | 'password' | 'wechat' | 'qq';
@@ -116,6 +117,30 @@ function parseLoginResponse(response: KuGouResponse): LoginSession {
   };
   commitSession(data, session);
   return session;
+}
+
+/**
+ * 刷新登录失败的响应 → 可操作的提示。
+ *
+ * 20017 表示 token 已过期，20018 表示 token 校验失败；两者都只能重新登录，
+ * 继续显示“请求失败 (502)”会让用户不知道发生了什么。
+ */
+function refreshErrorFromBody(body: any): Error {
+  const code = Number(body?.error_code ?? body?.errcode);
+  if (code === 20017) return new Error('登录状态已过期，请重新登录');
+  if (code === 20018) return new Error('登录状态校验未通过，请稍后重试或重新登录');
+  if (code === 20028) return new Error('请求触发安全验证，请稍后再试');
+
+  const message = loginErrorMessage(body);
+  if (message) return new Error(message);
+  return new Error('登录状态刷新失败，请稍后重试');
+}
+
+/** 把刷新过程中抛出的异常统一转成 UI 可展示的 Error */
+function refreshLoginError(error: unknown): Error {
+  if (error instanceof KuGouApiError) return refreshErrorFromBody(error.body);
+  if (error instanceof Error && error.message) return error;
+  return new Error('登录状态刷新失败，请稍后重试');
 }
 
 /** 去掉 +86 / 86 前缀并校验中国大陆手机号 */
@@ -325,25 +350,27 @@ export async function checkQqLoginQr(session: QqQrSession): Promise<QqQrStatus> 
   const body = response?.body || {};
   const rawStatus = body?.status;
 
-  if (Number(rawStatus) === 1) {
-    return {
-      status: 'success',
-      message: '登录成功',
-      session: parseLoginResponse(response),
-    };
+  // 扫码中 / 已扫码 / 已过期由模块直接返回字符串状态
+  if (typeof rawStatus === 'string') {
+    if (rawStatus === 'wait' || rawStatus === '66') {
+      return { status: 'wait', message: errorText(body?.msg) || '请使用手机 QQ 扫码' };
+    }
+    if (rawStatus === 'expired' || rawStatus === '65') {
+      return { status: 'expired', message: errorText(body?.msg) || '二维码已失效，请刷新' };
+    }
+    if (rawStatus === '67') {
+      return { status: 'scanned', message: errorText(body?.msg) || '已扫码，请在手机 QQ 中确认' };
+    }
+    // 其它 QQ 状态码（取消、风控等）：停止轮询，由用户刷新二维码
+    return { status: 'expired', message: errorText(body?.msg) || `QQ 扫码状态异常（${rawStatus}），请刷新` };
   }
 
-  if (rawStatus === 'wait' || String(rawStatus) === '66') {
-    return { status: 'wait', message: errorText(body?.msg) || '请使用手机 QQ 扫码' };
-  }
-  if (rawStatus === 'expired' || String(rawStatus) === '65') {
-    return { status: 'expired', message: errorText(body?.msg) || '二维码已失效，请刷新' };
-  }
-  if (String(rawStatus) === '67') {
-    return { status: 'scanned', message: errorText(body?.msg) || '已扫码，请在手机 QQ 中确认' };
-  }
-
-  return { status: 'wait', message: errorText(body?.msg) || '等待 QQ 扫码' };
+  // 数值状态来自扫码成功后的酷狗登录响应；失败时 parseLoginResponse 会抛错
+  return {
+    status: 'success',
+    message: '登录成功',
+    session: parseLoginResponse(response),
+  };
 }
 
 /** QQ 开放平台参数直接登录（已有 openid / access_token 时使用） */
@@ -359,10 +386,63 @@ export async function loginByQq(openid: string, accessToken: string): Promise<Lo
 // 其它登录相关接口
 // ---------------------------------------------------------------------------
 
-/** 刷新登录态（延长 token 有效期） */
+/**
+ * 刷新登录态（延长 token 有效期）。
+ *
+ * 与普通登录不同，刷新成功时服务端可能：
+ *   1. 在 `secu_params` 中返回新的 token；
+ *   2. 只续期而不改变 token，响应体里没有 token/userid。
+ * 因此不能复用登录页的严格解析（它要求响应体必须带凭证）。
+ * 只要服务端确认成功且本地原本已登录，就沿用当前登录态。
+ */
 export async function refreshLogin(): Promise<LoginSession> {
-  const response = await callModule('/login/token');
-  return parseLoginResponse(response);
+  const before = getAuth();
+  if (!before.token || !before.userid || before.userid === '0') {
+    throw new Error('当前未登录或登录凭证已失效，请重新登录');
+  }
+
+  // 刷新接口会用 dfid + 设备标识校验登录态；dfid 缺失时先静默补注册
+  await ensureDfid().catch(() => null);
+
+  let response: KuGouResponse;
+  try {
+    response = await callModule('/login/token', {
+      token: before.token,
+      userid: before.userid,
+    });
+  } catch (error) {
+    throw refreshLoginError(error);
+  }
+
+  const body = response?.body || {};
+  const rawData = body?.data;
+  const data = rawData && typeof rawData === 'object' && !Array.isArray(rawData) ? rawData : {};
+
+  if (Number(body?.status) !== 1) {
+    throw refreshErrorFromBody(body);
+  }
+
+  // 响应没有新凭证时沿用当前值：刷新主要是延长有效期，token 通常不变。
+  // 取调用后的最新 Cookie，兼容服务端只用 Set-Cookie 返回新 token 的情况。
+  const latest = getAuth();
+  const token = errorText(data?.token) || errorText(body?.token) || latest.token || before.token;
+  const userid = errorText(data?.userid) || errorText(body?.userid) || latest.userid || before.userid;
+  if (!token || token === '0' || !userid || userid === '0') {
+    throw new Error('登录状态刷新失败：接口未返回有效凭证，请重新登录');
+  }
+
+  const session: LoginSession = {
+    userid,
+    token,
+    nickname:
+      errorText(data?.nickname) ||
+      errorText(data?.username) ||
+      errorText(data?.user_name) ||
+      '酷狗用户',
+    vipType: Number(data?.vip_type ?? data?.vipType ?? 0) || 0,
+  };
+  commitSession(data, session);
+  return session;
 }
 
 /** 使用当前账号授权另一台设备的二维码登录 */
