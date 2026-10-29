@@ -38,3 +38,5 @@ src-tauri/gen/android/build
 *.njsproj
 *.sln
 *.sw?
+
+src/KuGouMusicApi
