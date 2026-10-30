@@ -34,6 +34,10 @@
 ### 播放与账号
 
 - **播放**：全局播放队列、列表循环/单曲循环/随机播放、上一首/下一首、拖动进度、音质回退
+- **完整歌单队列**：播放全部 / 随机播放 / 点击歌单内任意歌曲时，会先拉取整个歌单（最多 5000 首）作为队列，不再受首屏 50 首限制
+- **搜索试听插入队列**：搜索结果和歌词搜索结果只把点中的歌曲插入当前歌曲之后并立即播放，不会替换正在听的歌单
+- **音质与封面补齐**：云歌单自动通过 `/privilege/lite` 补齐 320K/无损/OGG hash，通过 `/album/detail` 补齐封面；切换音质会立即重新加载当前歌曲
+- **歌曲信息展示**：相关版本、概念版免费听兼容 `base` / `audio_info` / `copyright.trans_param` 等嵌套结构，正确显示歌手、封面与多音质
 - **VIP**：概念版每日自动领取 1 天 VIP；无完整播放权限时自动请求 `free_part` 试听片段
 - **歌词**：KRC/LRC 解码、逐行高亮、自动滚动、翻译开关、点击歌词跳转
 - **歌单管理**：收藏公开歌单、重命名/删除自己的歌单、添加/移除歌曲、排序（协议层）
@@ -99,7 +103,7 @@ pnpm api:check
 pnpm api:catalog
 ```
 
-### Android
+### Android 调试
 
 首次需要生成 Android 工程并打 manifest 补丁（允许 http 回退地址）：
 
@@ -109,16 +113,14 @@ pnpm android:init
 
 # 真机/模拟器调试
 pnpm android:dev
-
-# 生成 APK / AAB
-pnpm android:build
 ```
 
 `pnpm android:init` 实际执行：
 
 1. `tauri android init` 生成 `src-tauri/gen/android`
-2. `node scripts/patch-android.mjs` 给 `AndroidManifest.xml` 增加
-   `android:usesCleartextTraffic="true"` 与 `INTERNET` 权限
+2. `node scripts/patch-android.mjs` 给 `AndroidManifest.xml` 补 `INTERNET` 权限，
+   把新版模板里的 `${usesCleartextTraffic}` 占位符改成 `true`（release 也允许 http 回退），
+   并给 `app/build.gradle.kts` 补 release 签名配置
 
 如果已经初始化过工程，只需重新打补丁：
 
@@ -128,6 +130,267 @@ pnpm android:patch
 
 > 客户端会优先把酷狗图片/媒体地址升级为 `https`，但个别 CDN 可能只返回 `http`，
 > 因此 Android 端保留明文流量开关作为兼容兜底。
+
+### Android Release 打包
+
+> 本机已经准备好一套便携工具链，`src-tauri/gen/android` 也已初始化并配置好签名。
+> 直接看下面的「4. 构建 Release 包」即可；换电脑时再按完整步骤操作。
+
+#### 0. 本机工具链（D:\Android）
+
+| 项目 | 路径 |
+| --- | --- |
+| JDK 17 | `D:\Android\jdk-17.0.21.0.2+1` |
+| Android SDK | `D:\Android\Sdk` |
+| NDK | `D:\Android\Sdk\ndk\29.0.13846066` |
+| Gradle 用户目录 | `D:\Android\gradle-home` |
+| Gradle 发行包（已放入 wrapper 缓存） | `D:\Android\tools\gradle-9.6.1-bin.zip` |
+| Release 密钥 | `D:\Android\keystores\kiru-release.jks`（alias `kiru`） |
+| 密钥密码文件 | `D:\Android\keystores\kiru-release.password` |
+
+> 这套工具链对应 Tauri 2.12 生成的 Android 工程：compileSdk/targetSdk 37、NDK 29、
+> Gradle 9.6.1、JDK 17。`keystore.properties` 里的密码来自上面的密码文件；
+> 该目录是明文保存，注意不要上传或分享，务必离线备份 `.jks` 和密码。
+> 如果以后想给 Muskugou 单独一把钥匙，按「3. 生成签名密钥（可选）」重新生成，
+> 并同步修改 `keystore.properties`。
+
+#### 1. 设置环境变量（每开一个新终端都要做）
+
+PowerShell（VSCode 默认终端）：
+
+```powershell
+$env:JAVA_HOME = 'D:\Android\jdk-17.0.21.0.2+1'
+$env:ANDROID_HOME = 'D:\Android\Sdk'
+$env:ANDROID_SDK_ROOT = $env:ANDROID_HOME
+$env:NDK_HOME = 'D:\Android\Sdk\ndk\29.0.13846066'
+$env:GRADLE_USER_HOME = 'D:\Android\gradle-home'
+$env:Path = "$env:JAVA_HOME\bin;$env:ANDROID_HOME\platform-tools;$env:Path"
+```
+
+Git Bash：
+
+```bash
+export JAVA_HOME="D:/Android/jdk-17.0.21.0.2+1"
+export ANDROID_HOME="D:/Android/Sdk"
+export ANDROID_SDK_ROOT="$ANDROID_HOME"
+export NDK_HOME="$ANDROID_HOME/ndk/29.0.13846066"
+export GRADLE_USER_HOME="D:/Android/gradle-home"
+export PATH="$JAVA_HOME/bin:$ANDROID_HOME/platform-tools:$PATH"
+```
+
+检查：
+
+```bash
+java -version        # 必须是 17
+adb version
+pnpm -v
+```
+
+> **Windows 必看**：Tauri 构建 Android 时会把 Rust 产物软链接到
+> `gen/android/app/src/main/jniLibs/<abi>/`。Windows 默认不允许普通进程创建软链接，
+> 如果报 `Creation symbolic link is not allowed for this system`，请任选一种：
+>
+> 1. 开启 **开发者模式**：设置 → 系统 → 开发者选项 → 开发人员模式；
+> 2. 用 **管理员身份** 打开终端再执行构建。
+>
+> 开启后重新打开终端，再次运行构建即可。已经编译过的 Rust 依赖会复用，第二次会快很多。
+
+如果 `adb` 找不到，直接用绝对路径 `D:\Android\Sdk\platform-tools\adb.exe`。
+Rust Android target 已经装好（aarch64/armv7/i686/x86_64），换电脑时才需要执行：
+
+```bash
+rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
+```
+
+#### 2. Android 工程与签名配置
+
+本机已经执行过：
+
+```bash
+pnpm android:init
+pnpm android:patch
+```
+
+如果以后删除了 `src-tauri/gen/android` 并重新初始化，重新执行
+`pnpm android:patch` 会自动补回 manifest 和 release 签名配置。
+
+`src-tauri/gen/android/keystore.properties`（已被 `.gitignore` 忽略）内容示意：
+
+```properties
+password=<D:\Android\keystores\kiru-release.password 的内容>
+keyAlias=kiru
+storeFile=D:/Android/keystores/kiru-release.jks
+```
+
+`app/build.gradle.kts` 里的对应配置：
+
+```kotlin
+import java.io.FileInputStream
+import java.util.Properties
+
+val keystorePropertiesFile = rootProject.file("keystore.properties")
+val keystoreProperties = Properties()
+if (keystorePropertiesFile.exists()) {
+    keystoreProperties.load(FileInputStream(keystorePropertiesFile))
+}
+
+android {
+    signingConfigs {
+        if (keystorePropertiesFile.exists()) {
+            create("release") {
+                keyAlias = keystoreProperties.getProperty("keyAlias")
+                keyPassword = keystoreProperties.getProperty("password")
+                storeFile = file(keystoreProperties.getProperty("storeFile"))
+                storePassword = keystoreProperties.getProperty("password")
+            }
+        }
+    }
+    buildTypes {
+        getByName("release") {
+            signingConfig = signingConfigs.findByName("release")
+            // ... 其它配置 ...
+        }
+    }
+}
+```
+
+#### 3. 生成签名密钥（可选，仅在没有密钥时）
+
+如果 `kiru-release.jks` 已经用于另一个已发布的应用，建议不要复用（两个应用会共享签名身份），
+而是为 Muskugou 新建一把钥匙：
+
+```bash
+mkdir -p D:/Android/keystores
+
+"$JAVA_HOME/bin/keytool" -genkeypair -v \
+  -storetype PKCS12 \
+  -keystore D:/Android/keystores/muskugou-release.jks \
+  -alias muskugou \
+  -keyalg RSA \
+  -keysize 2048 \
+  -validity 10000
+```
+
+按提示设置密码和证书信息（姓名/组织可随意填写）。然后把 `keystore.properties` 改成：
+
+```properties
+password=你设置的密码
+keyAlias=muskugou
+storeFile=D:/Android/keystores/muskugou-release.jks
+```
+
+> 密钥库密码和 key 密码请使用同一个值，Gradle 配置只读取一个 `password` 字段。
+> 密钥和密码丢失后无法覆盖安装或更新已发布的应用，务必离线备份。
+
+#### 4. 构建 Release 包
+
+确保当前终端已经按第 1 节设置好环境变量，并且位于项目根目录
+`E:\code\Tauriprogect\Muskugou`：
+
+```bash
+# 通用 APK（所有 ABI 打在一起，首次发布最省事）
+pnpm android:build:apk
+
+# Google Play 使用的 AAB
+pnpm android:build:aab
+
+# 按 ABI 拆分，单个包更小（真机一般只需要 arm64）
+pnpm tauri android build --apk --split-per-abi
+```
+
+构建会自动执行 `beforeBuildCommand`（即 `pnpm build`），然后编译 Rust 和 Android 工程。
+首次构建需要下载 Gradle 依赖并编译各 ABI，通常 10–30 分钟；之后增量构建会快很多。
+
+只想快速验证 UI 时可以打 debug 包（使用调试签名，不能上架）：
+
+```bash
+pnpm tauri android build --debug --apk
+```
+
+也可以直接用本机的一键脚本（会自动设置上面的环境变量）：
+
+```bat
+scripts\build-android.bat apk
+scripts\build-android.bat aab
+scripts\build-android.bat split
+scripts\build-android.bat debug
+```
+
+#### 5. 产物位置与安装
+
+默认产物：
+
+```text
+src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk
+src-tauri/gen/android/app/build/outputs/bundle/release/app-release.aab
+```
+
+按 ABI 拆分时在 `outputs/apk/<abi>/release/` 下，例如
+`app-arm64-release.apk`。找不到时可以直接搜索：
+
+```bash
+find src-tauri/gen/android/app/build/outputs -name "*.apk" -o -name "*.aab"
+```
+
+安装到已连接的手机：
+
+```bash
+adb install -r src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk
+```
+
+如果提示 `INSTALL_FAILED_UPDATE_INCOMPATIBLE`，说明设备上已有不同签名的版本：
+先 `adb uninstall com.smilecover.muskugou`，再安装（会清除应用本地数据）。
+
+#### 6. 版本号与升级
+
+上架或覆盖安装新版本前，必须同时更新版本号：
+
+1. 修改 `src-tauri/tauri.conf.json` 的 `version`；
+2. 修改 `package.json` 的 `version`（保持一致）；
+3. Android 的 `versionCode` 必须大于上次发布的值。默认由 semver 推导：
+   `versionCode = major * 1000000 + minor * 1000 + patch`（`0.1.0` → `1000`）。
+   也可以在 `tauri.conf.json` 中显式指定：
+
+```json
+{
+  "bundle": {
+    "android": {
+      "versionCode": 1000,
+      "minSdkVersion": 24
+    }
+  }
+}
+```
+
+> 如果开启 `bundle.android.autoIncrementVersionCode`，Tauri 会读取并递增
+> `src-tauri/gen/android/app/tauri.properties`；此时需要把该文件从
+> `app/.gitignore` 中移除并纳入版本管理，避免每次构建都从同一个值开始。
+
+> `identifier`（当前为 `com.smilecover.muskugou`）一旦上架就不要再改，
+> 否则会被应用商店视为另一个应用。
+
+#### 7. 发布前检查清单
+
+- [ ] Release APK 能安装、能登录、能播放（不要只测 debug 包）
+- [ ] `version` / `versionCode` 已递增
+- [ ] `keystore.properties` 和 `.jks` 没有被 `git add`
+- [ ] 分享/备份项目时没有带上 `src-tauri/gen/android/keystore.properties`
+- [ ] 密钥库与密码已离线备份
+- [ ] 上架 Google Play 时上传 AAB，并启用 Play App Signing
+- [ ] 重新初始化过 Android 工程后执行过 `pnpm android:patch`
+
+#### 常见问题
+
+| 现象 | 处理 |
+| --- | --- |
+| `ANDROID_HOME is not set` | 按第 1 节设置环境变量后重开终端；本机 SDK 在 `D:\Android\Sdk` |
+| `SDK location not found` | 本机已写入 `src-tauri/gen/android/local.properties` 的 `sdk.dir=D:/Android/Sdk`；换电脑时改成自己的路径 |
+| `Could not read script 'tauri.settings.gradle'` | 不要直接运行 `gradlew`；用 `pnpm android:build:apk`，Tauri 会先生成该文件 |
+| `Keystore file ... not set` | `keystore.properties` 的 `storeFile` 路径不对；本机应为 `D:/Android/keystores/kiru-release.jks` |
+| `Unsupported class file major version` | Gradle 用错 JDK；把 `JAVA_HOME` 指向 `D:\Android\jdk-17.0.21.0.2+1` |
+| 首次构建卡在下载 | 本机 Gradle 发行包已放进 `D:\Android\gradle-home`；Maven 依赖仍可能联网，可配置代理或 `D:\Android\gradle-home\init.d\gradle-mirrors.gradle` 镜像 |
+| `INSTALL_FAILED_UPDATE_INCOMPATIBLE` | 设备上已有不同签名的包：`adb uninstall com.smilecover.muskugou` 后再装（会清除本地数据） |
+| 播放/图片在真机加载失败 | 确认执行过 `pnpm android:patch`，`AndroidManifest.xml` 的 `usesCleartextTraffic` 为 `true` |
 
 ---
 
@@ -148,7 +411,7 @@ Muskugou/
 │   │   │   ├── node/             # Node 内置模块兼容层
 │   │   │   └── ...
 │   │   ├── modules/              # 236 个全量移植的接口模块（自动生成）
-│   │   ├── features/             # 业务封装：认证/设备/发现/视频/听书/评论/歌单/用户/歌曲/搜索
+│   │   ├── features/             # 业务封装：认证/设备/发现/视频/听书/评论/歌单/用户/歌曲/搜索/音质封面
 │   │   ├── registry.ts           # 文件名 -> 路由，动态注册模块
 │   │   ├── route-catalog.ts      # 234 个路由的静态目录（接口中心使用，自动生成）
 │   │   ├── normalize.ts          # 统一 Song/Playlist/Album/Artist/Rank
@@ -167,10 +430,12 @@ Muskugou/
 │   ├── port-modules.mjs          # CommonJS -> ESM/TS 全量移植脚本
 │   ├── gen-route-catalog.mjs     # 从模块注释生成接口中心路由目录
 │   ├── verify-api.ts             # 协议层 20 项联调
-│   └── patch-android.mjs         # Android manifest 补丁
+│   ├── patch-android.mjs         # Android manifest 补丁
+│   └── build-android.bat         # 本机一键打包（设置 D:\Android 环境变量）
 ├── src-tauri/
 │   ├── src/lib.rs                # `http_request` 原生 HTTP 命令
 │   ├── tauri.conf.json
+│   ├── gen/android/              # `pnpm android:init` 生成的 Android 工程（已配置 release 签名）
 │   ├── app-icon.svg              # 图标源文件
 │   └── icons/                    # 桌面/Android/iOS 图标
 ├── public/favicon.svg
@@ -257,6 +522,22 @@ interface Song {
 
 同时提取多音质 hash（`FileHash`/`HQFileHash`/`SQFileHash`/`ResFileHash`/`SuperFileHash`），供播放器按设置选择并向下回退。
 
+归一化层还兼容不同接口的嵌套结构：`song_info`、`audio_info`、`base`、`album_info`，以及
+`copyright.trans_param`（相关版本接口把 OGG/封面放在这里）。歌名与歌手会从
+`base.songname`、`base.author_name` 等外层字段补齐；文件名会去掉 `.mp3` 等扩展名和与歌手
+重复的“歌手 - ”前缀，避免出现“未知歌手”“未知歌曲”或 `xxx.mp3`。
+
+### 8. 音质补齐与完整播放队列
+
+- `features/quality.ts`：批量调用 `/privilege/lite` 补齐每首歌的 128/320/FLAC/Hi-Res hash
+  （概念版 128/320 优先使用 OGG 资源），并用 `/album/detail` 补封面。权益结果与专辑封面都有
+  TTL/容量上限缓存，避免翻页和重复进入时发请求。
+- `client.ts` 的 `getPlaylistAllSongs()`：按 300 首/页循环拉取整个歌单，自动处理服务端
+  截断页大小、重复歌曲与总数缺失，最多 5000 首。详情页首屏仍只加载 50 首用于展示，
+  播放时再用完整列表建队列。
+- `stores/player.ts` 的 `playInserted()`：搜索试听不替换队列，而是插到当前歌曲之后播放；
+  若歌曲已在队列中则直接跳转。
+
 ### 6. 传输层
 
 - Tauri 环境：通过 `invoke('http_request')` 调用 Rust `reqwest`，绕开 WebView CORS，并拿到被隐藏的 `Set-Cookie`
@@ -270,6 +551,9 @@ interface Song {
 `stores/player.ts` 是唯一持有 `HTMLAudioElement` 的地方：
 
 - 队列与播放模式持久化到 `localStorage`
+- `playSongs()` 替换队列；`playInserted()` 保留队列并插入单曲（搜索试听）
+- 歌单播放前由 `getPlaylistAllSongs()` 拉取完整歌曲列表，避免队列只有首屏 50 首
+- 音质切换会清空地址缓存并立即重新请求当前歌曲，失败时按音质等级向下回退
 - 获取地址失败时调用 `free_part: true` 获取 60 秒试听
 - VIP/付费歌曲无地址时给出明确错误
 - 歌曲结束按模式循环/随机/停止

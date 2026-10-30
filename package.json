@@ -14,7 +14,9 @@
     "android:init": "tauri android init && node scripts/patch-android.mjs",
     "android:patch": "node scripts/patch-android.mjs",
     "android:dev": "tauri android dev",
-    "android:build": "tauri android build"
+    "android:build": "tauri android build",
+    "android:build:apk": "tauri android build --apk",
+    "android:build:aab": "tauri android build --aab"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

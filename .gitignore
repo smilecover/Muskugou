@@ -20,6 +20,8 @@ src-tauri/gen/schemas
 src-tauri/gen/android/.gradle
 src-tauri/gen/android/app/build
 src-tauri/gen/android/build
+src-tauri/gen/android/keystore.properties
+src-tauri/gen/android/local.properties
 *.jks
 *.keystore
 
