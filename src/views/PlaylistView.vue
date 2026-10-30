@@ -27,6 +27,7 @@ import {
   type Song,
 } from '@/api';
 import { formatCount } from '@/utils/format';
+import { useLibraryStore } from '@/stores/library';
 import { usePlayerStore } from '@/stores/player';
 import { useToastStore } from '@/stores/toast';
 import { useUserStore } from '@/stores/user';
@@ -37,6 +38,7 @@ const router = useRouter();
 const player = usePlayerStore();
 const toast = useToastStore();
 const user = useUserStore();
+const library = useLibraryStore();
 
 /** 数字 id 表示当前账号的歌单，可以在线移除歌曲；公开歌单只读 */
 const isUserList = computed(() => /^\d+$/.test(props.id));
@@ -193,6 +195,7 @@ async function removeSong(song: Song): Promise<void> {
   try {
     await removeSongsFromPlaylist(props.id, [song.fileId]);
     songs.value = songs.value.filter((item) => item.id !== song.id);
+    if (library.isLikedList(props.id)) library.removeLikedSong(song.id);
     total.value = Math.max(0, total.value - 1);
     fullQueue = null;
     fullQueueLoaded = false;

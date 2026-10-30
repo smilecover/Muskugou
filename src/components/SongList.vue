@@ -83,9 +83,13 @@ async function play(index: number): Promise<void> {
   }
 }
 
-function toggleFavorite(song: Song): void {
-  const added = library.toggleFavorite(song);
-  toast.success(added ? '已收藏' : '已取消收藏');
+async function toggleFavorite(song: Song): Promise<void> {
+  try {
+    const added = await library.toggleFavorite(song);
+    toast.success(added ? '已收藏' : '已取消收藏');
+  } catch (error) {
+    toast.error(toErrorMessage(error));
+  }
 }
 </script>
 
@@ -139,6 +143,7 @@ function toggleFavorite(song: Song): void {
         v-if="showFavorite"
         class="song-row__heart"
         :class="{ 'song-row__heart--on': library.isFavorite(song.id) }"
+        :disabled="library.isFavoritePending(song.id)"
         :aria-label="library.isFavorite(song.id) ? '取消收藏' : '收藏'"
         @click.stop="toggleFavorite(song)"
       >
@@ -272,6 +277,10 @@ function toggleFavorite(song: Song): void {
 
 .song-row__heart:active {
   background: rgba(255, 255, 255, 0.07);
+}
+
+.song-row__heart:disabled {
+  opacity: 0.45;
 }
 
 .bars {

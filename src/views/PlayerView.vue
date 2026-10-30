@@ -33,7 +33,7 @@ import CommentSheet from '@/components/CommentSheet.vue';
 import CoverImage from '@/components/CoverImage.vue';
 import QueueSheet from '@/components/QueueSheet.vue';
 import SongInfoSheet from '@/components/SongInfoSheet.vue';
-import { getSongMvs } from '@/api';
+import { getSongMvs, toErrorMessage } from '@/api';
 import { useLibraryStore } from '@/stores/library';
 import { usePlayerStore } from '@/stores/player';
 import { useSettingsStore } from '@/stores/settings';
@@ -109,10 +109,14 @@ function onSeekChange(event: Event): void {
   dragging.value = false;
 }
 
-function toggleFavorite(): void {
+async function toggleFavorite(): Promise<void> {
   if (!player.current) return;
-  const added = library.toggleFavorite(player.current);
-  toast.success(added ? '已收藏' : '已取消收藏');
+  try {
+    const added = await library.toggleFavorite(player.current);
+    toast.success(added ? '已收藏' : '已取消收藏');
+  } catch (error) {
+    toast.error(toErrorMessage(error));
+  }
 }
 
 /** 评论接口使用 mixsongid，歌曲没有 mixsongid 时退回音频 id */
@@ -346,7 +350,12 @@ onMounted(() => {
 
           <!-- 收藏 / 歌单 / 评论 / MV / 音质 / 歌词 -->
           <div class="player-actions">
-            <button class="action" :class="{ 'action--active': isFavorite }" @click="toggleFavorite">
+            <button
+              class="action"
+              :class="{ 'action--active': isFavorite }"
+              :disabled="library.isFavoritePending(player.current.id)"
+              @click="toggleFavorite"
+            >
               <Heart :size="19" :fill="isFavorite ? 'currentColor' : 'none'" />
               <span>{{ isFavorite ? '已收藏' : '收藏' }}</span>
             </button>

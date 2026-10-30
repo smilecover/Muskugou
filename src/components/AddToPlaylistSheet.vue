@@ -17,6 +17,7 @@ import {
   type Playlist,
   type Song,
 } from '@/api';
+import { useLibraryStore } from '@/stores/library';
 import { useToastStore } from '@/stores/toast';
 import { useUserStore } from '@/stores/user';
 
@@ -29,6 +30,7 @@ const emit = defineEmits<{ close: []; added: [] }>();
 
 const router = useRouter();
 const user = useUserStore();
+const library = useLibraryStore();
 const toast = useToastStore();
 
 const playlists = ref<Playlist[]>([]);
@@ -56,6 +58,7 @@ async function add(playlist: Playlist): Promise<void> {
   addingId.value = playlist.id;
   try {
     await addSongsToPlaylist(listid, props.songs);
+    if (library.isLikedPlaylist(playlist)) library.addLikedSongs(props.songs);
     toast.success(`已添加 ${props.songs.length} 首到「${playlist.name}」`);
     emit('added');
     emit('close');

@@ -60,8 +60,9 @@ function parseBody(text: string): any {
 /** 判断业务是否失败（与原库一致） */
 function isBusinessFailure(body: any): boolean {
   if (!body || typeof body !== 'object') return false;
-  if (body.status === 0) return true;
-  return Boolean(body.error_code && body.error_code !== 0);
+  // 服务端可能把 status / error_code 返回成字符串 "0"，统一按数字判断
+  if (body.status !== undefined && body.status !== null && Number(body.status) === 0) return true;
+  return Boolean(body.error_code) && Number(body.error_code) !== 0;
 }
 
 /** 把错误响应包装成可读错误 */

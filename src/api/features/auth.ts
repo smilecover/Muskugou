@@ -68,6 +68,131 @@ function loginErrorMessage(body: any): string {
   );
 }
 
+/** 字符串化的 JSON（模块层偶尔会把解密结果直接塞进 token 字段） */
+function parseJsonValue(value: unknown, depth = 0): unknown {
+  if (typeof value !== 'string' || depth >= 2) return value;
+  const text = value.trim();
+  if (!text || (text[0] !== '{' && text[0] !== '[')) return value;
+  try {
+    return parseJsonValue(JSON.parse(text), depth + 1);
+  } catch {
+    return value;
+  }
+}
+
+/** 安全转成对象；数组不是登录凭证容器 */
+function asRecord(value: unknown): Record<string, any> | null {
+  const parsed = parseJsonValue(value);
+  return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+    ? (parsed as Record<string, any>)
+    : null;
+}
+
+/** 只接受字符串/数字，避免把对象误当成 token */
+function scalarText(value: unknown): string {
+  if (typeof value === 'string') return value.trim();
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  return '';
+}
+
+/** 从一组对象中提取 token/userid（兼容 user_id、uid、userinfo 等字段） */
+function credentialFrom(record: Record<string, any> | null): { token: string; userid: string } {
+  if (!record) return { token: '', userid: '' };
+  const containers = [record];
+  for (const key of ['userinfo', 'user_info', 'user', 'account', 'member', 'profile']) {
+    const nested = asRecord(record[key]);
+    if (nested) containers.push(nested);
+  }
+
+  let token = '';
+  let userid = '';
+  for (const source of containers) {
+    token =
+      token ||
+      scalarText(source.token) ||
+      scalarText(source.access_token) ||
+      scalarText(source.tokenstr);
+    userid =
+      userid ||
+      scalarText(source.userid) ||
+      scalarText(source.user_id) ||
+      scalarText(source.userId) ||
+      scalarText(source.kugouid);
+  }
+
+  // 模块层可能把 secu_params 解密后的 JSON 字符串写进 token
+  const nested = asRecord(token);
+  if (nested) {
+    const inner = credentialFrom(nested);
+    if (inner.token) token = inner.token;
+    if (!userid && inner.userid) userid = inner.userid;
+  }
+
+  if (token === 'undefined' || token === 'null') token = '';
+  if (userid === 'undefined' || userid === 'null') userid = '';
+  return { token, userid };
+}
+
+interface LoginAccountOption {
+  userid: string;
+  nickname: string;
+}
+
+function accountOptionFrom(item: unknown): LoginAccountOption | null {
+  const account = asRecord(item);
+  if (!account) return null;
+  const userid =
+    scalarText(account.userid) ||
+    scalarText(account.user_id) ||
+    scalarText(account.userId) ||
+    scalarText(account.uid);
+  const nickname =
+    scalarText(account.nickname) ||
+    scalarText(account.username) ||
+    scalarText(account.user_name);
+  return userid || nickname ? { userid, nickname } : null;
+}
+
+/** 手机号绑定多个账号时，接口会把可选账号放在 info_list / userlist 中 */
+function extractLoginAccounts(value: unknown, depth = 0): LoginAccountOption[] {
+  if (!value || typeof value !== 'object' || depth > 3) return [];
+
+  if (Array.isArray(value)) {
+    const accounts = value
+      .map(accountOptionFrom)
+      .filter((item): item is LoginAccountOption => Boolean(item));
+    return accounts;
+  }
+
+  const record = value as Record<string, any>;
+  for (const key of ['info_list', 'userlist', 'user_list', 'accounts', 'account_list']) {
+    const list = record[key];
+    if (!Array.isArray(list)) continue;
+    const accounts = list
+      .map(accountOptionFrom)
+      .filter((item): item is LoginAccountOption => Boolean(item));
+    if (accounts.length) return accounts;
+  }
+
+  for (const key of ['data', 'body']) {
+    const nested = extractLoginAccounts(record[key], depth + 1);
+    if (nested.length) return nested;
+  }
+  return [];
+}
+
+function accountSelectionMessage(accounts: LoginAccountOption[]): string {
+  const names = accounts
+    .slice(0, 5)
+    .map((account) => {
+      const id = account.userid && account.userid !== '0' ? `ID ${account.userid}` : '';
+      return [account.nickname, id].filter(Boolean).join(' / ');
+    })
+    .filter(Boolean)
+    .join('，');
+  return `该手机号绑定了多个酷狗账号，请在「账号 ID」中填写要登录的账号${names ? `（${names}）` : ''}`;
+}
+
 /** 写入酷狗登录 Cookie，确保 hasLogin() 立即生效 */
 function commitSession(data: any, session: LoginSession): void {
   const cookies: Record<string, string> = {
@@ -92,26 +217,43 @@ function commitSession(data: any, session: LoginSession): void {
  */
 function parseLoginResponse(response: KuGouResponse): LoginSession {
   const body = response?.body || {};
-  const rawData = body?.data;
-  const data = rawData && typeof rawData === 'object' && !Array.isArray(rawData) ? rawData : {};
+  const data = asRecord(body?.data) || {};
 
   if (Number(body?.status) !== 1) {
+    const accounts = extractLoginAccounts(body);
+    if (accounts.length) throw new Error(accountSelectionMessage(accounts));
     throw new Error(loginErrorMessage(body) || '登录失败，请检查账号信息后重试');
   }
 
-  const token = errorText(data?.token) || errorText(body?.token);
-  const userid = errorText(data?.userid) || errorText(body?.userid);
+  // 兼容 data 为 JSON 字符串、token 被写成 JSON 字符串、以及 userinfo 嵌套
+  const fromData = credentialFrom(data);
+  const fromBody = credentialFrom(body);
+  const token = fromData.token || fromBody.token;
+  const userid = fromData.userid || fromBody.userid;
+
   if (!token || !userid || userid === '0') {
+    const accounts = extractLoginAccounts(body);
+    if (accounts.length) throw new Error(accountSelectionMessage(accounts));
+
+    // 只输出字段名，便于定位服务端返回结构，不泄露 token 等敏感值
+    if (typeof console !== 'undefined') {
+      const bodyKeys = body && typeof body === 'object' ? Object.keys(body).join(',') : typeof body;
+      const dataKeys = data && Object.keys(data).length ? Object.keys(data).join(',') : '';
+      console.warn('[auth] 登录响应缺少凭证', { status: body?.status, bodyKeys, dataKeys });
+    }
     throw new Error(loginErrorMessage(body) || '登录失败：接口未返回有效的登录凭证');
   }
 
+  const profile = asRecord(data.userinfo) || asRecord(data.user_info) || asRecord(data.user) || {};
   const session: LoginSession = {
     userid,
     token,
     nickname:
-      errorText(data?.nickname) ||
-      errorText(data?.username) ||
-      errorText(data?.user_name) ||
+      scalarText(data.nickname) ||
+      scalarText(data.username) ||
+      scalarText(data.user_name) ||
+      scalarText(profile.nickname) ||
+      scalarText(profile.username) ||
       '酷狗用户',
     vipType: Number(data?.vip_type ?? data?.vipType ?? 0) || 0,
   };
@@ -188,8 +330,15 @@ export async function loginBySms(mobile: string, code: string, userid?: string):
   const uid = String(userid || '').trim();
   if (uid) params.userid = uid;
 
-  const response = await callModule('/login/cellphone', params);
-  return parseLoginResponse(response);
+  try {
+    const response = await callModule('/login/cellphone', params);
+    return parseLoginResponse(response);
+  } catch (error) {
+    // 多账号时接口可能以业务失败返回 info_list，给出可操作的提示
+    const accounts = extractLoginAccounts((error as any)?.body);
+    if (accounts.length) throw new Error(accountSelectionMessage(accounts));
+    throw error;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -321,12 +470,13 @@ export async function createQqLoginQr(): Promise<QqQrSession> {
 
   return {
     image: rawImage.startsWith('data:image/') ? rawImage : `data:image/png;base64,${rawImage}`,
-    qrsig: errorText(data?.qrsig),
-    ptqrtoken: errorText(data?.ptqrtoken),
-    ptLoginSig: errorText(data?.pt_login_sig),
-    ptOpenloginData: errorText(data?.pt_openlogin_data),
-    xloginUrl: errorText(data?.xlogin_url),
-    cookie: errorText(data?.cookie),
+    qrsig: scalarText(data?.qrsig),
+    // ptqrtoken 由 hash33 计算，模块返回的是数字，必须转成字符串
+    ptqrtoken: scalarText(data?.ptqrtoken),
+    ptLoginSig: scalarText(data?.pt_login_sig),
+    ptOpenloginData: scalarText(data?.pt_openlogin_data),
+    xloginUrl: scalarText(data?.xlogin_url),
+    cookie: scalarText(data?.cookie),
   };
 }
 

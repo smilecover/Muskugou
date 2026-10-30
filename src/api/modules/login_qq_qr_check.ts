@@ -202,14 +202,17 @@ export default (params: any, useAxios: UseAxios): Promise<any> => {
           headers: { 'x-router': 'login.user.kugou.com' },
         });
 
-        if (loginResp.body?.status === 1) {
-          const getToken = cryptoAesDecrypt(loginResp.body.data?.secu_params, encrypt.key);
-          if (typeof getToken === 'object') {
-            loginResp.body.data = { ...loginResp.body.data, ...getToken };
-            Object.keys(getToken).forEach((key) => loginResp.cookie.push(`${key}=${getToken[key]}`));
-          } else {
-            loginResp.body.data['token'] = getToken;
-            loginResp.cookie.push(`token=${getToken}`);
+        // 服务端可能把 status 返回成字符串 "1"，统一按数字判断
+        if (Number(loginResp.body?.status) === 1 && loginResp.body?.data && typeof loginResp.body.data === 'object') {
+          if (loginResp.body.data.secu_params) {
+            const getToken = cryptoAesDecrypt(loginResp.body.data.secu_params, encrypt.key);
+            if (getToken && typeof getToken === 'object') {
+              loginResp.body.data = { ...loginResp.body.data, ...getToken };
+              Object.keys(getToken).forEach((key) => loginResp.cookie.push(`${key}=${getToken[key]}`));
+            } else if (typeof getToken === 'string' && getToken) {
+              loginResp.body.data['token'] = getToken;
+              loginResp.cookie.push(`token=${getToken}`);
+            }
           }
           loginResp.cookie.push(`t1=${loginResp.body.data?.t1 ?? ''}`);
           loginResp.cookie.push(`userid=${loginResp.body.data?.userid || 0}`);

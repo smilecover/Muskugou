@@ -24,10 +24,12 @@ import {
   type UserGrade,
   type UserProfile,
 } from '@/api';
+import { useLibraryStore } from './library';
 import { useToastStore } from './toast';
 
 export const useUserStore = defineStore('user', () => {
   const toast = useToastStore();
+  const library = useLibraryStore();
 
   const loggedIn = ref(hasLogin());
   const profile = ref<UserProfile | null>(null);
@@ -97,6 +99,8 @@ export const useUserStore = defineStore('user', () => {
       ]);
       profile.value = nextProfile;
       playlists.value = nextPlaylists;
+      // 登录后「收藏」使用酷狗「我喜欢」歌单，后台同步歌曲
+      if (hasLogin()) library.applyPlaylists(nextPlaylists);
       loggedIn.value = hasLogin();
     } finally {
       loading.value = false;
@@ -125,8 +129,9 @@ export const useUserStore = defineStore('user', () => {
     finishing.value = true;
     try {
       stopPolling();
-      // 换了账号后旧 auth 不能继续使用，强制重新获取
+      // 换了账号后旧 auth 与旧「我喜欢」都不能继续使用
       resetUserAuth();
+      library.resetCloud();
       await ensureUserAuth(true).catch(() => '');
       await refresh();
       loggedIn.value = hasLogin();
@@ -215,6 +220,7 @@ export const useUserStore = defineStore('user', () => {
     stopPolling();
     clearAuth();
     resetUserAuth();
+    library.resetCloud();
     qr.value = null;
     qrStatus.value = -1;
     qrMessage.value = '';

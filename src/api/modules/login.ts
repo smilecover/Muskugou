@@ -37,22 +37,27 @@ export default (params: any, useAxios: UseAxios): Promise<any> => {
     })
       .then((res) => {
         const { body } = res;
-        if (body?.status && body?.status === 1) {
-          if (body?.data?.secu_params) {
+        // 服务端可能把 status 返回成字符串 "1"，统一按数字判断
+        if (Number(body?.status) === 1 && body?.data && typeof body.data === 'object') {
+          if (body.data.secu_params) {
             const getToken = cryptoAesDecrypt(body.data.secu_params, encrypt.key);
-            if (typeof getToken === 'object') {
+            if (getToken && typeof getToken === 'object') {
               res.body.data = { ...body.data, ...getToken };
               Object.keys(getToken).forEach((key) => res.cookie.push(`${key}=${getToken[key]}`));
-            } else {
+            } else if (typeof getToken === 'string' && getToken) {
               res.body.data['token'] = getToken;
-              res.cookie.push(`token=${getToken}`);
             }
-            res.cookie.push(`userid=${res.body.data?.userid || 0}`);
-            res.cookie.push(`vip_type=${res.body.data?.vip_type || 0}`);
-            res.cookie.push(`vip_token=${res.body.data?.vip_token || ''}`);
+          }
 
-            resolve(res);
-            return;
+          // 只落库真实存在的字段，避免 "undefined" / 0 覆盖本地登录态
+          const data = res.body.data || {};
+          for (const key of ['t1', 'token', 'userid', 'vip_type', 'vip_token', 'dfid']) {
+            const raw = data[key];
+            if (raw === undefined || raw === null) continue;
+            const value = String(raw).trim();
+            if (!value || value === 'undefined' || value === 'null') continue;
+            if ((key === 'token' || key === 'userid') && value === '0') continue;
+            res.cookie.push(`${key}=${value}`);
           }
         }
         resolve(res);

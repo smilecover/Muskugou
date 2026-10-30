@@ -62,14 +62,17 @@ export default (params: any, useAxios: UseAxios): Promise<any> => {
         headers: { 'x-router': 'login.user.kugou.com' },
       });
 
-      if (response.body?.status === 1) {
-        const getToken = cryptoAesDecrypt(response.body.data?.secu_params, encrypt.key);
-        if (typeof getToken === 'object') {
-          response.body.data = { ...response.body.data, ...getToken };
-          Object.keys(getToken).forEach((key) => response.cookie.push(`${key}=${getToken[key]}`));
-        } else {
-          response.body.data['token'] = getToken;
-          response.cookie.push(`token=${getToken}`);
+      // 服务端可能把 status 返回成字符串 "1"，统一按数字判断
+      if (Number(response.body?.status) === 1 && response.body?.data && typeof response.body.data === 'object') {
+        if (response.body.data.secu_params) {
+          const getToken = cryptoAesDecrypt(response.body.data.secu_params, encrypt.key);
+          if (getToken && typeof getToken === 'object') {
+            response.body.data = { ...response.body.data, ...getToken };
+            Object.keys(getToken).forEach((key) => response.cookie.push(`${key}=${getToken[key]}`));
+          } else if (typeof getToken === 'string' && getToken) {
+            response.body.data['token'] = getToken;
+            response.cookie.push(`token=${getToken}`);
+          }
         }
         response.cookie.push(`t1=${response.body.data?.t1 ?? ''}`);
         response.cookie.push(`userid=${response.body.data?.userid || 0}`);
